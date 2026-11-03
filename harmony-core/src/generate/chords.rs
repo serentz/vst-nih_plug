@@ -6,7 +6,7 @@
 
 use super::rhythm::CHORD_PRESETS;
 use super::rng::Rng;
-use super::{fit_lengths, harmonic_tones, velocity, Context, GenNote, Pattern};
+use super::{fit_lengths, harmonic_tones, vary_articulation, velocity, Context, GenNote, Pattern};
 use crate::theory::{Chord, PitchClass, Quality, Scale};
 
 #[derive(Clone, Copy, Debug)]
@@ -21,6 +21,8 @@ pub struct ChordParams {
     pub color: bool,
     pub follow_changes: bool,
     pub gate: f32,
+    /// Part des attaques dont l'articulation varie (legato, plus courte, plus longue).
+    pub articulation: f32,
     pub velocity: u8,
 }
 
@@ -34,6 +36,7 @@ impl Default for ChordParams {
             color: true,
             follow_changes: true,
             gate: 0.95,
+            articulation: 0.25,
             velocity: 64,
         }
     }
@@ -151,6 +154,7 @@ pub fn generate(ctx: &Context, p: &ChordParams, rng: &mut Rng) -> Pattern {
         }
     }
     fit_lengths(&mut notes, length, p.gate);
+    vary_articulation(&mut notes, length, p.articulation, rng);
     Pattern { length, notes }
 }
 

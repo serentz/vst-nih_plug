@@ -6,7 +6,7 @@
 
 use super::rhythm::{parse_bar, Hit, Onset, BASS_FILL, BASS_PRESETS, STEPS_PER_BAR};
 use super::rng::Rng;
-use super::{fit_lengths, nearest_pitch, velocity, Context, GenNote, Pattern};
+use super::{fit_lengths, nearest_pitch, vary_articulation, velocity, Context, GenNote, Pattern};
 
 #[derive(Clone, Copy, Debug)]
 pub struct BassParams {
@@ -22,6 +22,8 @@ pub struct BassParams {
     /// Durée des attaques ajoutées aux changements d'accord, en proportion de l'écart
     /// jusqu'à l'attaque suivante (les rythmes écrivent eux-mêmes leurs durées et silences).
     pub gate: f32,
+    /// Part des attaques dont l'articulation varie (legato, plus courte, plus longue).
+    pub articulation: f32,
     pub velocity: u8,
 }
 
@@ -34,6 +36,7 @@ impl Default for BassParams {
             fill_last_bar: true,
             follow_changes: true,
             gate: 0.85,
+            articulation: 0.35,
             velocity: 72,
         }
     }
@@ -94,6 +97,7 @@ pub fn generate(ctx: &Context, p: &BassParams, rng: &mut Rng) -> Pattern {
         });
     }
     fit_lengths(&mut notes, length, p.gate);
+    vary_articulation(&mut notes, length, p.articulation, rng);
     Pattern { length, notes }
 }
 

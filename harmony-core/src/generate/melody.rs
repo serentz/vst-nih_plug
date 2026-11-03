@@ -15,7 +15,7 @@
 
 use super::rhythm::{parse_bar, STEPS_PER_BAR};
 use super::rng::Rng;
-use super::{fit_lengths, harmonic_tones, Context, GenNote, Pattern};
+use super::{fit_lengths, harmonic_tones, vary_articulation, Context, GenNote, Pattern};
 use crate::theory::{Chord, Role};
 
 #[derive(Clone, Copy, Debug)]
@@ -25,12 +25,14 @@ pub struct MelodyParams {
     pub high: u8,
     /// Respiration : probabilité de remplacer une note de temps faible par un silence.
     pub rests: f32,
+    /// Part des notes dont l'articulation varie (legato, plus courte, plus longue).
+    pub articulation: f32,
     pub velocity: u8,
 }
 
 impl Default for MelodyParams {
     fn default() -> Self {
-        Self { low: 62, high: 79, rests: 0.2, velocity: 62 }
+        Self { low: 62, high: 79, rests: 0.2, articulation: 0.35, velocity: 62 }
     }
 }
 
@@ -44,6 +46,8 @@ const DENSE: &[&str] = &[
     "..x-x-x-x-x-x---",
     "x-x-x-x.x.x---..",
     "x.x.x-x-x-x-..x-",
+    "x--x-x.x---x-...",
+    "x-x--x.x-x-x---.",
 ];
 /// Mesures aérées (réponse) ; la dernière prépare une anacrouse vers la mesure suivante.
 const SPARSE: &[&str] = &[
@@ -52,6 +56,8 @@ const SPARSE: &[&str] = &[
     "x---x-x-x---....",
     "x-x-x---........",
     "x-----..x-..x-x-",
+    "x.x--x-.......x-",
+    "x---.x-x---.....",
 ];
 /// Fin de la première moitié (question), suivie d'une respiration.
 const CADENCE: &[&str] = &["x---x---x---....", "x-------x---....", "x---x---x-......"];
@@ -292,6 +298,7 @@ pub fn generate(ctx: &Context, p: &MelodyParams, rng: &mut Rng) -> Pattern {
         })
         .collect();
     fit_lengths(&mut notes, length, 1.0);
+    vary_articulation(&mut notes, length, p.articulation, rng);
     Pattern { length, notes }
 }
 
@@ -323,6 +330,16 @@ mod tests {
                 assert!((p.low..=p.high).contains(&n.pitch));
                 assert!(crate::theory::Scale::new(10, crate::theory::Mode::Major).contains(n.pitch % 12));
             }
+        }
+    }
+
+    #[test]
+    fn silences_are_not_all_equal() {
+        for (pat, _) in melodies(8, 10) {
+            let gaps: std::collections::BTreeSet<u32> =
+                pat.notes.windows(2).map(|w| w[1].start - (w[0].start + w[0].len)).collect();
+            assert!(gaps.contains(&0), "aucun legato : {gaps:?}");
+            assert!(gaps.len() >= 3, "silences trop réguliers : {gaps:?}");
         }
     }
 

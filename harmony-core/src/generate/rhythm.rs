@@ -68,27 +68,29 @@ impl RhythmPreset {
 }
 
 pub const BASS_PRESETS: &[RhythmPreset] = &[
-    RhythmPreset { name: "Pop", bars: &["x-x-x-x-.x-.x-..", "x-x-x-o-.x-.x-x."] },
-    RhythmPreset { name: "Croches", bars: &["x.x.x.x.x.x.x.x."] },
-    RhythmPreset { name: "Octaves", bars: &["x.o.x.o.x.o.x.o."] },
-    RhythmPreset { name: "Syncopé", bars: &["x-.x-.x-.x-.x-x.", "x-.x-.x-..x-x-.."] },
-    RhythmPreset { name: "Noires", bars: &["x--.x--.x--.x--."] },
-    RhythmPreset { name: "Rondes", bars: &["x-----------...."] },
-    RhythmPreset { name: "Contretemps", bars: &["..x-..x-..x-..x-"] },
+    RhythmPreset { name: "Pop", bars: &["x-x-x-x-.x-.x-..", "x-x.x-o--x..x-x."] },
+    RhythmPreset { name: "Croches", bars: &["x.x.x-x.x.x.x-x.", "x.x-x.x.x-x.x.x."] },
+    RhythmPreset { name: "Octaves", bars: &["x.o.x.o-x.o.x-o.", "x-o.x.o.x.o-x.o."] },
+    RhythmPreset { name: "Syncopé", bars: &["x-.x-.x-.x-.x-x.", "x--x.-x-..x-x---"] },
+    RhythmPreset { name: "Noires", bars: &["x--.x--.x--.x--.", "x---x-.x--.x--.."] },
+    RhythmPreset { name: "Rondes", bars: &["x-----------....", "x-------.....x-."] },
+    RhythmPreset { name: "Contretemps", bars: &["..x-..x-..x-..x-", "..x-..x...x-..x."] },
     RhythmPreset { name: "Fondamentale-quinte", bars: &["x-----..5-----..", "x--.5--.x--.5--."] },
+    RhythmPreset { name: "Irrégulier", bars: &["x--x-.x.x---.x-.", "x-.x---.x-x.x---"] },
 ];
 
 /// Relance de la dernière mesure d'un cycle de basse.
 pub const BASS_FILL: &str = "x-.xx-x-.x-.x-x.";
 
 pub const CHORD_PRESETS: &[RhythmPreset] = &[
-    RhythmPreset { name: "3+3+3+3+4", bars: &["x-.x-.x-.x-.x-.."] },
-    RhythmPreset { name: "Pop", bars: &["x-x-x-x-.x-.x-.."] },
+    RhythmPreset { name: "3+3+3+3+4", bars: &["x-.x-.x-.x-.x-..", "x--x-.x--x-.x---"] },
+    RhythmPreset { name: "Pop", bars: &["x-x-x-x-.x-.x-..", "x-x-x.x--x-.x-x."] },
     RhythmPreset { name: "Relance", bars: &["x-------..x-x-x.", "x-.x-.x-.x-.x-x."] },
-    RhythmPreset { name: "Croches", bars: &["x.x.x.x.x.x.x.x."] },
-    RhythmPreset { name: "Blanches", bars: &["x------.x------."] },
+    RhythmPreset { name: "Croches", bars: &["x.x.x.x-x.x.x.x-"] },
+    RhythmPreset { name: "Blanches", bars: &["x------.x------.", "x-------x-----.."] },
     RhythmPreset { name: "Rondes", bars: &["x-------------.."] },
-    RhythmPreset { name: "Stabs contretemps", bars: &["..x...x...x...x."] },
+    RhythmPreset { name: "Stabs contretemps", bars: &["..x...x-..x...x.", "..x-..x...x-..x."] },
+    RhythmPreset { name: "Irrégulier", bars: &["x--x-.x.x---.x-.", "x-.x---.x-x.x---"] },
 ];
 
 pub fn preset_by_name(presets: &[RhythmPreset], name: &str) -> Option<usize> {

@@ -82,6 +82,31 @@ pub(crate) fn fit_lengths(notes: &mut [GenNote], length: u32, gate: f32) {
     }
 }
 
+/// Varie l'articulation pour que les silences entre les notes ne soient pas tous égaux.
+/// Pour chaque attaque tirée au sort (probabilité `amount`, toutes les voix d'un accord
+/// ensemble), la note devient legato (aucun silence avant la suivante), plus courte,
+/// ou plus longue dans le silence disponible. À appeler après [`fit_lengths`].
+pub(crate) fn vary_articulation(notes: &mut [GenNote], length: u32, amount: f32, rng: &mut rng::Rng) {
+    let mut starts: Vec<u32> = notes.iter().map(|n| n.start).collect();
+    starts.sort_unstable();
+    starts.dedup();
+    for (i, &start) in starts.iter().enumerate() {
+        if !rng.chance(amount) {
+            continue;
+        }
+        let span = starts.get(i + 1).copied().unwrap_or(length) - start;
+        let Some(current) = notes.iter().find(|n| n.start == start).map(|n| n.len) else { continue };
+        let new_len = match rng.range(0, 2) {
+            0 => span,
+            1 => (current / 2).max(1),
+            _ => (current + rng.range(1, span.saturating_sub(current).max(1) as i32) as u32).min(span),
+        };
+        for n in notes.iter_mut().filter(|n| n.start == start) {
+            n.len = new_len;
+        }
+    }
+}
+
 /// Vélocité humanisée : accent sur le premier temps, plus léger sur les temps,
 /// plus doux sur les doubles croches impaires.
 pub(crate) fn velocity(rng: &mut rng::Rng, base: u8, step: u32, humanize: i32) -> u8 {
