@@ -1,0 +1,12 @@
+[package]
+name = "harmogen-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "harmogen"
+path = "src/main.rs"
+
+[dependencies]
+harmony-core = { path = "../harmony-core" }
+midly = "0.5"

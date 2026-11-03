@@ -1,0 +1,7 @@
+[package]
+name = "harmony-core"
+version = "0.1.0"
+edition = "2021"
+description = "Théorie musicale et analyse harmonique pour Harmogen (sans dépendance au plugin)"
+
+[dependencies]
