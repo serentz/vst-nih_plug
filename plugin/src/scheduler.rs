@@ -50,6 +50,11 @@ impl Scheduler {
         self.fresh = true;
     }
 
+    /// Longueur de la boucle jouée (0 si rien n'est joué).
+    pub fn length(&self) -> u32 {
+        self.current.length
+    }
+
     pub fn stop(&mut self) {
         self.current = Pattern::default();
         self.last_end = None;

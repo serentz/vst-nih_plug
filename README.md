@@ -26,6 +26,9 @@ ou des accords rythmés accordés sur cette progression, avec des variations à 
   (silence ↔ note, hauteur ±1 degré, vélocité ±, durée ±), avec garde-fous harmoniques
   (temps forts sur notes de l'accord, fondamentale de basse aux changements, densité et étendue
   ancrées sur le modèle). 1 ou 2 rendus sont toujours calculés à l'avance (`PassEngine`).
+- **Phase 4 — plugin (validé dans Live)** : capture de la progression (4/8/16 mesures, calée sur la mesure),
+  génération en arrière-plan, lecture au sample près avec une variation à chaque tour.
+- **Phase 5 — interface** : fenêtre egui (réglages, progression reconnue, piano roll du tour joué).
 
 ## Analyse d'un fichier MIDI
 
@@ -74,7 +77,11 @@ Fonctionnement :
 3. Changer un réglage (ligne, rythme, tonalité, graine, variations) : pris en compte au tour suivant.
 4. `Réapprendre` (passer à On) : nouvelle capture au prochain début de mesure.
 
-Paramètres : `Ligne` (Mélodie, Basse, Accords), `Longueur`, `Tonalité` (Auto ou imposée), `Rythme basse`,
+Interface : choix de la ligne et de la longueur, boutons `Réapprendre` et `Retour au modèle`, progression
+reconnue (accords et tonalité, avec les alternatives), piano roll du tour en cours avec tête de lecture,
+rythmes, graine et réglages de variation.
+
+Paramètres (aussi automatisables) : `Ligne` (Mélodie, Basse, Accords), `Longueur`, `Tonalité` (Auto ou imposée), `Rythme basse`,
 `Rythme accords`, `Graine`, `Var. silence` / `Var. hauteur` / `Var. vélocité` / `Var. durée`,
 `Retour au modèle` (jamais ou tous les N tours), `Réapprendre`, `Renvoyer l'entrée` (laisse aussi passer les accords).
 

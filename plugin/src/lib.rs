@@ -13,19 +13,23 @@
 //! prend effet au début du tour suivant.
 
 mod capture;
+mod editor;
 mod scheduler;
+mod shared;
 mod worker;
 
 use capture::Capture;
 use harmony_core::generate::rhythm::{BASS_PRESETS, CHORD_PRESETS};
 use harmony_core::generate::variation::{LineKind, VariationParams};
-use harmony_core::generate::Pattern;
 use harmony_core::theory::NOTE_NAMES;
 use harmony_core::STEPS_PER_BEAT;
 use nih_plug::prelude::*;
+use nih_plug_egui::EguiState;
 use scheduler::{Event, Scheduler};
+use shared::{Shared, Tagged};
 use std::collections::VecDeque;
 use std::num::NonZeroU32;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use worker::{LogEvent, Settings, Task, Worker};
 
@@ -75,6 +79,9 @@ fn percent(name: &str, default: f32) -> FloatParam {
 
 #[derive(Params)]
 struct HarmogenParams {
+    /// Taille de la fenêtre, conservée avec le projet.
+    #[persist = "editor-state"]
+    editor_state: Arc<EguiState>,
     #[id = "line"]
     line: EnumParam<Line>,
     #[id = "bars"]
@@ -107,6 +114,7 @@ impl Default for HarmogenParams {
     fn default() -> Self {
         let v = VariationParams::default();
         Self {
+            editor_state: editor::default_state(),
             line: EnumParam::new("Ligne", Line::Melody),
             bars: EnumParam::new("Longueur", Bars::Eight),
             key: IntParam::new("Tonalité", -1, IntRange::Linear { min: -1, max: 23 })
@@ -149,7 +157,8 @@ pub struct Harmogen {
     /// Pas absolu où la boucle commence (début de la capture).
     anchor: i64,
     scheduler: Scheduler,
-    ready: Arc<Mutex<VecDeque<Pattern>>>,
+    ready: Arc<Mutex<VecDeque<Tagged>>>,
+    shared: Arc<Shared>,
     worker: Arc<Mutex<Worker>>,
     last_settings: Option<Settings>,
     previous_relearn: bool,
@@ -160,15 +169,16 @@ pub struct Harmogen {
 impl Default for Harmogen {
     fn default() -> Self {
         let ready = Arc::new(Mutex::new(VecDeque::with_capacity(8)));
-        let summary = Arc::new(Mutex::new(String::new()));
+        let shared = Arc::new(Shared::default());
         Self {
             params: Arc::new(HarmogenParams::default()),
             state: State::Waiting,
             capture: None,
             anchor: 0,
             scheduler: Scheduler::default(),
-            worker: Arc::new(Mutex::new(Worker::new(ready.clone(), summary))),
+            worker: Arc::new(Mutex::new(Worker::new(ready.clone(), shared.clone()))),
             ready,
+            shared,
             last_settings: None,
             previous_relearn: false,
             events: Vec::with_capacity(1024),
@@ -248,6 +258,10 @@ impl Plugin for Harmogen {
         self.params.clone()
     }
 
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        editor::create(self.params.clone(), self.shared.clone())
+    }
+
     fn task_executor(&mut self) -> TaskExecutor<Self> {
         let worker = self.worker.clone();
         Box::new(move |task| {
@@ -280,7 +294,8 @@ impl Plugin for Harmogen {
 
         // Réapprendre (front montant) : nouvelle capture au prochain début de mesure.
         let relearn = self.params.relearn.value();
-        if relearn && !self.previous_relearn {
+        let relearn_clicked = self.shared.relearn_request.swap(false, Ordering::Relaxed);
+        if (relearn && !self.previous_relearn) || relearn_clicked {
             self.scheduler.all_off(0, &mut |e| self.events.push(e));
             self.scheduler.stop();
             self.capture = None;
@@ -288,6 +303,9 @@ impl Plugin for Harmogen {
             context.execute_background(Task::Log(LogEvent::Relearn));
         }
         self.previous_relearn = relearn;
+        if self.shared.model_request.swap(false, Ordering::Relaxed) && self.state == State::Playing {
+            context.execute_background(Task::BackToModel);
+        }
 
         // Réglages modifiés : nouveau modèle, joué à partir du tour suivant.
         let settings = self.settings();
@@ -364,7 +382,9 @@ impl Plugin for Harmogen {
 
         if self.state == State::Building {
             if let Some(first) = self.ready.try_lock().ok().and_then(|mut r| r.pop_front()) {
-                self.scheduler.start(first, self.anchor);
+                self.shared.playing_generation.store(first.generation, Ordering::Relaxed);
+                self.shared.playing_index.store(first.index, Ordering::Relaxed);
+                self.scheduler.start(first.pattern, self.anchor);
                 self.state = State::Playing;
                 context.execute_background(Task::Refill);
                 context.execute_background(Task::Log(LogEvent::Playing));
@@ -373,11 +393,14 @@ impl Plugin for Harmogen {
 
         if self.state == State::Playing {
             let ready = &self.ready;
+            let shared = &self.shared;
             let mut consumed = false;
             let mut next = || {
-                let pass = ready.try_lock().ok().and_then(|mut r| r.pop_front());
-                consumed |= pass.is_some();
-                pass
+                let tagged = ready.try_lock().ok().and_then(|mut r| r.pop_front())?;
+                consumed = true;
+                shared.playing_generation.store(tagged.generation, Ordering::Relaxed);
+                shared.playing_index.store(tagged.index, Ordering::Relaxed);
+                Some(tagged.pattern)
             };
             let events = &mut self.events;
             self.scheduler.render(start, samples, sps, &mut next, &mut |e| events.push(e));
@@ -385,6 +408,25 @@ impl Plugin for Harmogen {
                 context.execute_background(Task::Refill);
             }
         }
+
+        // État pour l'interface.
+        let (state, position, length) = match self.state {
+            State::Waiting => (shared::STATE_WAITING, 0, 0),
+            State::Capturing => {
+                let cap = self.capture.as_ref();
+                let pos = cap.map_or(0, |c| (start - c.start).floor() as i32);
+                (shared::STATE_CAPTURING, pos, cap.map_or(0, |c| c.length))
+            }
+            State::Building => (shared::STATE_BUILDING, 0, settings.bars * 16),
+            State::Playing => {
+                let length = self.scheduler.length();
+                let pos = if length > 0 { ((start.floor() as i64 - self.anchor).rem_euclid(length as i64)) as i32 } else { 0 };
+                (shared::STATE_PLAYING, pos, length)
+            }
+        };
+        self.shared.state.store(state, Ordering::Relaxed);
+        self.shared.position.store(position, Ordering::Relaxed);
+        self.shared.length.store(length, Ordering::Relaxed);
 
         self.send_events(context);
         ProcessStatus::Normal

@@ -8,8 +8,9 @@ use harmony_core::analysis::{detect_key, segment, Progression, TimedNote};
 use harmony_core::generate::engine::PassEngine;
 use harmony_core::generate::rng::Rng;
 use harmony_core::generate::variation::{LineKind, VariationParams};
-use harmony_core::generate::{bass, chords, melody, Context, Pattern};
+use harmony_core::generate::{bass, chords, melody, Context};
 use harmony_core::theory::{Mode, Scale};
+use crate::shared::{Shared, Tagged, DISPLAY_PASSES};
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -48,6 +49,8 @@ pub enum Task {
     Rebuild(Settings),
     /// Un passage a été consommé : en calculer un autre.
     Refill,
+    /// Bouton « Retour au modèle » : on repart du modèle au prochain tour.
+    BackToModel,
     Log(LogEvent),
 }
 
@@ -55,14 +58,17 @@ pub struct Worker {
     notes: Vec<TimedNote>,
     length: u32,
     engine: Option<PassEngine>,
-    ready: Arc<Mutex<VecDeque<Pattern>>>,
-    /// Résumé lisible (progression, tonalité) pour l'interface à venir.
-    pub summary: Arc<Mutex<String>>,
+    settings: Option<Settings>,
+    ready: Arc<Mutex<VecDeque<Tagged>>>,
+    shared: Arc<Shared>,
+    generation: u32,
+    /// Numéro du dernier passage calculé dans la génération.
+    index: u32,
 }
 
 impl Worker {
-    pub fn new(ready: Arc<Mutex<VecDeque<Pattern>>>, summary: Arc<Mutex<String>>) -> Self {
-        Self { notes: Vec::new(), length: 0, engine: None, ready, summary }
+    pub fn new(ready: Arc<Mutex<VecDeque<Tagged>>>, shared: Arc<Shared>) -> Self {
+        Self { notes: Vec::new(), length: 0, engine: None, settings: None, ready, shared, generation: 0, index: 0 }
     }
 
     pub fn handle(&mut self, task: Task) {
@@ -78,6 +84,11 @@ impl Worker {
                 }
             }
             Task::Refill => self.refill(),
+            Task::BackToModel => {
+                if let Some(s) = self.settings {
+                    self.rebuild(s);
+                }
+            }
             Task::Log(e) => log(&format!("{e:?}")),
         }
     }
@@ -113,8 +124,17 @@ impl Worker {
             base.notes.len()
         );
         log(&summary);
-        if let Ok(mut sum) = self.summary.lock() {
-            *sum = summary;
+
+        self.generation += 1;
+        self.index = 0;
+        self.settings = Some(s);
+        if let Ok(mut d) = self.shared.display.lock() {
+            d.length = self.length;
+            d.chords = progression.segments.iter().map(|seg| (seg.start, seg.len(), seg.chord.symbol())).collect();
+            d.key = format!("{}{}", scale.name(), if s.key >= 0 { " (imposée)" } else { " (détectée)" });
+            d.alternatives = plausible;
+            d.generation = self.generation;
+            d.passes.clear();
         }
 
         let mut engine =
@@ -131,7 +151,15 @@ impl Worker {
         let Some(engine) = self.engine.as_mut() else { return };
         if let Ok(mut r) = self.ready.lock() {
             while r.len() < READY_PASSES {
-                r.push_back(engine.next_pass());
+                let pattern = engine.next_pass();
+                self.index += 1;
+                if let Ok(mut d) = self.shared.display.lock() {
+                    d.passes.push_back((self.index, pattern.clone()));
+                    while d.passes.len() > DISPLAY_PASSES {
+                        d.passes.pop_front();
+                    }
+                }
+                r.push_back(Tagged { generation: self.generation, index: self.index, pattern });
             }
         }
     }
@@ -175,11 +203,11 @@ mod tests {
     #[test]
     fn build_fills_the_ready_queue_and_refill_tops_it_up() {
         let ready = Arc::new(Mutex::new(VecDeque::new()));
-        let mut w = Worker::new(ready.clone(), Arc::new(Mutex::new(String::new())));
+        let mut w = Worker::new(ready.clone(), Arc::new(Shared::default()));
         w.handle(Task::Build { notes: chords(), length: 64, settings: settings() });
         assert_eq!(ready.lock().unwrap().len(), READY_PASSES);
         let first = ready.lock().unwrap().pop_front().unwrap();
-        assert_eq!(first.length, 64);
+        assert_eq!((first.generation, first.index, first.pattern.length), (1, 1, 64));
         w.handle(Task::Refill);
         assert_eq!(ready.lock().unwrap().len(), READY_PASSES);
     }
@@ -187,11 +215,14 @@ mod tests {
     #[test]
     fn rebuild_replaces_the_queue_with_the_new_model() {
         let ready = Arc::new(Mutex::new(VecDeque::new()));
-        let mut w = Worker::new(ready.clone(), Arc::new(Mutex::new(String::new())));
+        let shared = Arc::new(Shared::default());
+        let mut w = Worker::new(ready.clone(), shared.clone());
         w.handle(Task::Build { notes: chords(), length: 64, settings: settings() });
-        let melody = ready.lock().unwrap().front().cloned().unwrap();
+        let melody = ready.lock().unwrap().front().unwrap().pattern.clone();
         w.handle(Task::Rebuild(Settings { line: LineKind::Chords, ..settings() }));
-        let chords = ready.lock().unwrap().front().cloned().unwrap();
+        let chords = ready.lock().unwrap().front().unwrap().pattern.clone();
+        assert_eq!(shared.display.lock().unwrap().generation, 2);
+        assert_eq!(shared.display.lock().unwrap().chords.len(), 4);
         assert_ne!(melody, chords);
         assert!(chords.notes.len() > melody.notes.len());
     }
