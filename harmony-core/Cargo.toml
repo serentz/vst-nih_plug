@@ -5,3 +5,5 @@ edition = "2021"
 description = "Théorie musicale et analyse harmonique pour Harmogen (sans dépendance au plugin)"
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

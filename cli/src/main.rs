@@ -15,7 +15,8 @@ use harmony_core::generate::engine::PassEngine;
 use harmony_core::generate::rng::Rng;
 use harmony_core::generate::variation::{LineKind, VariationParams};
 use harmony_core::generate::{bass, chords, melody, Context, GenNote, Pattern};
-use harmony_core::library::{parse_chord_name, parse_progression_name, Family, NamedChord, NamedProgression};
+use harmony_core::bank::{FileInput, RawNote};
+use harmony_core::library::{parse_chord_name, parse_progression_name, Family, FileKind, NamedChord, NamedProgression};
 use harmony_core::theory::{note_name, Mode, Quality, Scale, NOTE_NAMES};
 use harmony_core::STEPS_PER_BEAT;
 use midly::num::{u15, u28, u4, u7};
@@ -485,12 +486,248 @@ fn bench(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Lit les notes d'un fichier en temps, sans quantification (pour les banques).
+fn load_raw(path: &str) -> Result<Vec<RawNote>, String> {
+    let data = std::fs::read(path).map_err(|e| format!("{path} : {e}"))?;
+    let smf = Smf::parse(&data).map_err(|e| format!("{path} : MIDI invalide ({e})"))?;
+    let Timing::Metrical(t) = smf.header.timing else { return Err("timing SMPTE non géré".into()) };
+    let tpq = t.as_int() as f64;
+    let mut notes = Vec::new();
+    for track in &smf.tracks {
+        let mut tick: u64 = 0;
+        let mut on: HashMap<(u8, u8), (u64, u8)> = HashMap::new();
+        for ev in track {
+            tick += ev.delta.as_int() as u64;
+            let TrackEventKind::Midi { channel, message } = ev.kind else { continue };
+            let (key, vel, is_on) = match message {
+                MidiMessage::NoteOn { key, vel } => (key.as_int(), vel.as_int(), vel.as_int() > 0),
+                MidiMessage::NoteOff { key, vel } => (key.as_int(), vel.as_int(), false),
+                _ => continue,
+            };
+            if is_on {
+                on.insert((channel.as_int(), key), (tick, vel));
+            } else if let Some((start, velocity)) = on.remove(&(channel.as_int(), key)) {
+                notes.push(RawNote {
+                    start: start as f64 / tpq,
+                    len: (tick - start) as f64 / tpq,
+                    pitch: key,
+                    velocity,
+                });
+            }
+        }
+    }
+    notes.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap().then(a.pitch.cmp(&b.pitch)));
+    Ok(notes)
+}
+
+/// Tous les fichiers `.mid` sous `dir`.
+fn midi_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            midi_files(&p, out);
+        } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("mid")) {
+            out.push(p);
+        }
+    }
+}
+
+/// Dossier par défaut des banques : `Documents\Harmogen\Banques`.
+fn banks_dir() -> PathBuf {
+    let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join("Documents").join("Harmogen").join("Banques")
+}
+
+/// `harmogen bank build <dossier de tonalité> [--name NOM] [--out FICHIER] [--skip 31]`
+fn bank_build(args: &[String]) -> Result<(), String> {
+    let dir = args.first().ok_or("dossier manquant")?;
+    let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
+    let name = value("--name").unwrap_or_else(|| "Banque".into());
+    let out = value("--out").map(PathBuf::from).unwrap_or_else(|| banks_dir().join(format!("{name}.json")));
+    let skip: Vec<u32> = value("--skip")
+        .map(|l| l.split(',').filter_map(|n| n.trim().parse().ok()).collect())
+        .unwrap_or_default();
+
+    // « C Major - A Minor » : gamme majeure du dossier (la relative mineure a les mêmes notes).
+    let key_name = Path::new(dir).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let tonic = key_name.split_whitespace().next().and_then(parse_key).map(|k| k.tonic).ok_or("dossier de tonalité attendu (« C Major - A Minor »)")?;
+    let scale = Scale::new(tonic, Mode::Major);
+
+    let mut bank = harmony_core::bank::Bank::new(&name, dir);
+    let mut entries: Vec<_> = std::fs::read_dir(dir).map_err(|e| format!("{dir} : {e}"))?.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    let mut analyzed = 0;
+    for entry in entries {
+        let Some(named) = parse_progression_name(&entry.file_name().to_string_lossy()) else { continue };
+        if skip.contains(&named.number) {
+            continue;
+        }
+        let mut files = Vec::new();
+        midi_files(&entry.path(), &mut files);
+        // Harmonies de référence du dossier.
+        let harmonies: Vec<Progression> = files
+            .iter()
+            .filter(|p| p.to_str().and_then(FileKind::from_path) == Some(FileKind::ChordProgression))
+            .filter_map(|p| load_notes(p.to_str()?).ok())
+            .map(|notes| {
+                let last = notes.iter().map(|n| n.end).max().unwrap_or(0);
+                segment(&notes, last.div_ceil(STEPS_PER_BAR) * STEPS_PER_BAR)
+            })
+            .collect();
+        for path in &files {
+            let Some(path_str) = path.to_str() else { continue };
+            let Some(kind) = FileKind::from_path(path_str) else { continue };
+            // Dry et Wet ont les mêmes notes : on n'en garde qu'un.
+            if path_str.contains("\\Wet\\") || path_str.contains("/Wet/") {
+                continue;
+            }
+            let Ok(notes) = load_raw(path_str) else { continue };
+            bank.add_file(FileInput { kind, notes: &notes, scale, harmonies: &harmonies });
+            analyzed += 1;
+        }
+        eprint!("\r  {analyzed} fichiers analysés");
+    }
+    eprintln!();
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{} : {e}", parent.display()))?;
+    }
+    std::fs::write(&out, bank.to_json()).map_err(|e| format!("{} : {e}", out.display()))?;
+    println!("banque « {name} » écrite : {}", out.display());
+    print_bank(&bank);
+    Ok(())
+}
+
+fn pct(x: f64, total: f64) -> String {
+    if total > 0.0 { format!("{:.0} %", 100.0 * x / total) } else { "–".into() }
+}
+
+fn roles_line(h: &harmony_core::bank::Hist) -> String {
+    let p = h.probs();
+    harmony_core::bank::ROLE_NAMES
+        .iter()
+        .zip(&p)
+        .filter(|(_, v)| **v >= 0.01)
+        .map(|(n, v)| format!("{n} {:.0} %", v * 100.0))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Probabilités d'attaque d'une mesure en 16 caractères : `.` < 10 %, puis 1–9, `#` ≥ 95 %.
+fn onset_line(p: &[f64]) -> String {
+    p.iter()
+        .map(|&x| match (x * 10.0).round() as i32 {
+            _ if x < 0.1 => '.',
+            n if n >= 10 => '#',
+            n => char::from_digit(n as u32, 10).unwrap(),
+        })
+        .collect()
+}
+
+fn print_rhythm(r: &harmony_core::bank::RhythmStats) {
+    for (place, name) in harmony_core::bank::PHRASE_PLACES.iter().enumerate() {
+        println!("      {:<18} {}", name, onset_line(&r.onset_probs(place)));
+    }
+    println!(
+        "      durée moyenne {:.1} pas, silence moyen {:.1} pas, {:.1} attaques par mesure",
+        r.length.mean(),
+        r.gap.mean(),
+        r.per_bar.mean()
+    );
+}
+
+fn print_bank(b: &harmony_core::bank::Bank) {
+    use harmony_core::theory::note_name;
+    let m = &b.melody;
+    println!("\nMélodie ({} fichiers)", m.files);
+    print_rhythm(&m.rhythm);
+    println!("    temps forts : {}", roles_line(&m.strong_roles));
+    println!("    temps faibles : {}", roles_line(&m.weak_roles));
+    let d = m.degree_moves.probs();
+    println!(
+        "    mouvements : répétée {:.0} %, conjoint {:.0} %, tierce {:.0} %, plus grand {:.0} % ; hors gamme {}",
+        d[7] * 100.0,
+        (d[6] + d[8]) * 100.0,
+        (d[5] + d[9]) * 100.0,
+        (1.0 - d[5] - d[6] - d[7] - d[8] - d[9]) * 100.0,
+        pct(m.chromatic, m.notes)
+    );
+    println!(
+        "    retour après saut {} ; reprise A′ : rythme {}, hauteurs {} ; étendue {} – {}",
+        pct(m.leaps_recovered, m.leaps),
+        pct(m.echo_rhythm, m.echo_compared),
+        pct(m.echo_pitches, m.echo_compared),
+        note_name(m.low.mean().round() as u8),
+        note_name(m.high.mean().round() as u8)
+    );
+    for (bpm, r) in &m.by_tempo {
+        println!("    tempo ≥ {bpm} : {:.1} attaques par mesure, durée moyenne {:.1} pas", r.per_bar.mean(), r.length.mean());
+    }
+    let bs = &b.bass;
+    println!("\nBasse ({} fichiers)", bs.files);
+    print_rhythm(&bs.rhythm);
+    println!("    fonctions : {}", roles_line(&bs.roles));
+    let mv = bs.moves.probs();
+    println!(
+        "    changements d'accord attaqués {} (sur la fondamentale {}) ; octave {:.0} % ; répétée {:.0} %",
+        pct(bs.changes_hit, bs.changes),
+        pct(bs.changes_root, bs.changes_hit),
+        (mv[0] + mv[24]) * 100.0,
+        mv[12] * 100.0
+    );
+    for (label, c) in [("Accords rapides", &b.fast_chords), ("Accords lents", &b.slow_chords)] {
+        println!("\n{label} ({} fichiers)", c.files);
+        print_rhythm(&c.rhythm);
+        let v = c.voices.probs();
+        let inv = c.inversion.probs();
+        println!(
+            "    voix : {} ; basse : fondamentale {:.0} %, tierce {:.0} %, quinte {:.0} % ; écart moyen {:.0} demi-tons",
+            (1..9).filter(|&i| v[i] >= 0.02).map(|i| format!("{i} {:.0} %", v[i] * 100.0)).collect::<Vec<_>>().join(", "),
+            inv[0] * 100.0,
+            inv[1] * 100.0,
+            inv[2] * 100.0,
+            c.spread.mean()
+        );
+        println!(
+            "    voix du haut : {} ; fondamentale doublée {} ; couleurs {}",
+            roles_line(&c.top_roles),
+            pct(c.doubled_root, c.attacks),
+            pct(c.colored, c.attacks)
+        );
+    }
+    let a = &b.arps;
+    println!("\nArpèges ({} fichiers)", a.files);
+    print_rhythm(&a.rhythm);
+    let mv = a.moves.probs();
+    println!(
+        "    mouvement dans l'accord : {} ; triolets {} ; étendue moyenne par mesure {:.0} demi-tons",
+        (0..9).filter(|&i| mv[i] >= 0.02).map(|i| format!("{:+} {:.0} %", i as i32 - 4, mv[i] * 100.0)).collect::<Vec<_>>().join(", "),
+        pct(a.triplet_onsets, a.onsets),
+        a.span.mean()
+    );
+}
+
+/// `harmogen bank show <fichier>`
+fn bank_show(args: &[String]) -> Result<(), String> {
+    let path = args.first().ok_or("fichier manquant")?;
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{path} : {e}"))?;
+    let bank = harmony_core::bank::Bank::from_json(&text)?;
+    println!("banque « {} » (source : {})", bank.name, bank.source);
+    print_bank(&bank);
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("analyze") => analyze(&args[1..]),
         Some("generate") => generate(&args[1..]),
         Some("bench") => bench(&args[1..]),
+        Some("bank") => match args.get(1).map(String::as_str) {
+            Some("build") => bank_build(&args[2..]),
+            Some("show") => bank_show(&args[2..]),
+            _ => return usage(),
+        },
         _ => return usage(),
     };
     match result {

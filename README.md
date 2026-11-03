@@ -50,6 +50,20 @@ Compare la progression reconnue de chaque fichier « Chord Progression » aux ac
 85,7 % des fichiers reconnus accord par accord ; la plupart des écarts restants sont des libertés du
 compositeur ou des erreurs d'étiquette de la bibliothèque.
 
+## Banques d'inspiration
+
+```bash
+cargo run -p harmogen-cli --release -- bank build "<bibliothèque>/C Major - A Minor" --name Niko --skip 31
+cargo run -p harmogen-cli --release -- bank show "%USERPROFILE%/Documents/Harmogen/Banques/Niko.json"
+```
+
+Une banque ne contient **que des statistiques** (comptages), jamais une note, un motif ou un rythme recopié :
+probabilité d'attaque sur chaque pas selon la place dans la phrase, durées et silences, attaques par mesure,
+vélocité selon le pas, fonction des notes dans l'accord (temps forts / faibles), mouvements en degrés,
+reprise A–A′, étendue, rythme selon le tempo (mélodie) ; fonctions et mouvements (basse) ; nombre de voix,
+renversements, écart, voix du haut, couleurs (accords rapides et lents) ; mouvement dans l'accord, triolets,
+étendue (arpèges). Les banques sont rangées dans `Documents\Harmogen\Banques` et ne sont pas versionnées.
+
 ## Générer des lignes
 
 ```bash

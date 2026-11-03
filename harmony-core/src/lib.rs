@@ -6,6 +6,7 @@
 //! 4 pas par temps) : c'est la résolution minimale d'un changement d'accord.
 
 pub mod analysis;
+pub mod bank;
 pub mod generate;
 pub mod library;
 pub mod theory;
