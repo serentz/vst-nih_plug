@@ -1,20 +1,37 @@
 //! Outil en ligne de commande pour tester le moteur d'Harmogen hors d'Ableton.
 //!
 //! ```text
-//! harmogen analyze <fichier.mid> [--bars N] [--min-pitch P] [--max-pitch P]
+//! harmogen analyze  <accords.mid> [options]
+//! harmogen generate <accords.mid> [options] [--kind bass|chords|melody|all] [--seed S]
+//!                   [--key Bb|Gm|...] [--bass-rhythm NOM] [--chord-rhythm NOM] [--out-dir DOSSIER]
 //! ```
+//! Options communes : `--bars N`, `--min-pitch P`, `--max-pitch P`.
 
-use harmony_core::analysis::{detect_key, segment, TimedNote};
-use harmony_core::theory::note_name;
+use harmony_core::analysis::{detect_key, segment, Progression, TimedNote};
+use harmony_core::generate::rhythm::{preset_by_name, BASS_PRESETS, CHORD_PRESETS};
+use harmony_core::generate::rng::Rng;
+use harmony_core::generate::{bass, chords, melody, Context, Pattern};
+use harmony_core::theory::{note_name, Mode, Scale, NOTE_NAMES};
 use harmony_core::STEPS_PER_BEAT;
-use midly::{MidiMessage, Smf, Timing, TrackEventKind};
+use midly::num::{u15, u28, u4, u7};
+use midly::{Format, Header, MetaMessage, MidiMessage, Smf, Timing, TrackEvent, TrackEventKind};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const STEPS_PER_BAR: u32 = 4 * STEPS_PER_BEAT;
+/// Résolution des fichiers écrits (ticks par noire).
+const OUT_TPQ: u32 = 96;
 
 fn usage() -> ExitCode {
-    eprintln!("usage : harmogen analyze <fichier.mid> [--bars N] [--min-pitch P] [--max-pitch P]");
+    eprintln!(
+        "usage :\n  harmogen analyze  <accords.mid> [--bars N] [--min-pitch P] [--max-pitch P]\n  \
+         harmogen generate <accords.mid> [--bars N] [--kind bass|chords|melody|all] [--seed S]\n                    \
+         [--key Bb|Gm|...] [--bass-rhythm NOM] [--chord-rhythm NOM] [--out-dir DOSSIER]\n\n\
+         rythmes de basse : {}\nrythmes d'accords : {}",
+        BASS_PRESETS.iter().map(|p| p.name).collect::<Vec<_>>().join(", "),
+        CHORD_PRESETS.iter().map(|p| p.name).collect::<Vec<_>>().join(", "),
+    );
     ExitCode::from(2)
 }
 
@@ -55,6 +72,45 @@ fn load_notes(path: &str) -> Result<Vec<TimedNote>, String> {
     Ok(notes)
 }
 
+/// Écrit une boucle générée dans un fichier MIDI à une piste.
+fn save_pattern(pattern: &Pattern, path: &Path) -> Result<(), String> {
+    let ticks = OUT_TPQ / STEPS_PER_BEAT;
+    // (tick, 0 = note-off avant 1 = note-on au même tick, hauteur, vélocité)
+    let mut events: Vec<(u32, u8, u8, u8)> = Vec::new();
+    for n in &pattern.notes {
+        events.push((n.start * ticks, 1, n.pitch, n.velocity));
+        events.push(((n.start + n.len) * ticks, 0, n.pitch, 0));
+    }
+    events.sort_unstable();
+    let mut track: Vec<TrackEvent> = vec![TrackEvent {
+        delta: u28::new(0),
+        kind: TrackEventKind::Meta(MetaMessage::TimeSignature(4, 2, 24, 8)),
+    }];
+    let mut last = 0;
+    for (tick, on, pitch, vel) in events {
+        let message = if on == 1 {
+            MidiMessage::NoteOn { key: u7::new(pitch), vel: u7::new(vel) }
+        } else {
+            MidiMessage::NoteOff { key: u7::new(pitch), vel: u7::new(0) }
+        };
+        track.push(TrackEvent {
+            delta: u28::new(tick - last),
+            kind: TrackEventKind::Midi { channel: u4::new(0), message },
+        });
+        last = tick;
+    }
+    let end = pattern.length * ticks;
+    track.push(TrackEvent {
+        delta: u28::new(end.saturating_sub(last)),
+        kind: TrackEventKind::Meta(MetaMessage::EndOfTrack),
+    });
+    let smf = Smf {
+        header: Header::new(Format::SingleTrack, Timing::Metrical(u15::new(OUT_TPQ as u16))),
+        tracks: vec![track],
+    };
+    smf.save(path).map_err(|e| format!("{} : {e}", path.display()))
+}
+
 /// Position façon Live : mesure.temps.double-croche, à partir de 1.
 fn position(step: u32) -> String {
     format!(
@@ -65,63 +121,116 @@ fn position(step: u32) -> String {
     )
 }
 
-fn duration(steps: u32) -> String {
-    let beats = steps as f32 / STEPS_PER_BEAT as f32;
-    format!("{beats} temps")
+/// Tonalité écrite `Bb`, `A#`, `Gm`, `Bbm`…
+fn parse_key(s: &str) -> Option<Scale> {
+    let (name, mode) = match s.strip_suffix('m') {
+        Some(n) => (n, Mode::NaturalMinor),
+        None => (s, Mode::Major),
+    };
+    let mut chars = name.chars();
+    let letter = chars.next()?.to_ascii_uppercase();
+    let base = NOTE_NAMES.iter().position(|n| n.len() == 1 && n.starts_with(letter))? as i32;
+    let shift = match chars.as_str() {
+        "" => 0,
+        "#" => 1,
+        "b" => -1,
+        _ => return None,
+    };
+    Some(Scale::new((base + shift).rem_euclid(12) as u8, mode))
 }
 
-fn analyze(args: &[String]) -> Result<(), String> {
-    let path = args.first().ok_or("fichier manquant")?;
-    let mut bars: Option<u32> = None;
-    let mut min_pitch = 0u8;
-    let mut max_pitch = 127u8;
+struct Options {
+    input: String,
+    bars: Option<u32>,
+    min_pitch: u8,
+    max_pitch: u8,
+    kind: String,
+    seed: u64,
+    key: Option<Scale>,
+    bass_rhythm: usize,
+    chord_rhythm: usize,
+    out_dir: PathBuf,
+}
+
+fn parse_options(args: &[String]) -> Result<Options, String> {
+    let mut o = Options {
+        input: args.first().ok_or("fichier manquant")?.clone(),
+        bars: None,
+        min_pitch: 0,
+        max_pitch: 127,
+        kind: "all".into(),
+        seed: 1,
+        key: None,
+        bass_rhythm: 0,
+        chord_rhythm: 0,
+        out_dir: PathBuf::from("."),
+    };
     let mut it = args[1..].iter();
     while let Some(flag) = it.next() {
         let value = it.next().ok_or(format!("valeur manquante pour {flag}"))?;
-        let parse = |v: &str| v.parse::<u32>().map_err(|_| format!("{flag} : nombre attendu"));
+        let num = |v: &str| v.parse::<u64>().map_err(|_| format!("{flag} : nombre attendu"));
         match flag.as_str() {
-            "--bars" => bars = Some(parse(value)?),
-            "--min-pitch" => min_pitch = parse(value)?.min(127) as u8,
-            "--max-pitch" => max_pitch = parse(value)?.min(127) as u8,
+            "--bars" => o.bars = Some(num(value)? as u32),
+            "--min-pitch" => o.min_pitch = num(value)?.min(127) as u8,
+            "--max-pitch" => o.max_pitch = num(value)?.min(127) as u8,
+            "--kind" => o.kind = value.clone(),
+            "--seed" => o.seed = num(value)?,
+            "--key" => o.key = Some(parse_key(value).ok_or(format!("tonalité inconnue : {value}"))?),
+            "--bass-rhythm" => {
+                o.bass_rhythm = preset_by_name(BASS_PRESETS, value).ok_or(format!("rythme de basse inconnu : {value}"))?
+            }
+            "--chord-rhythm" => {
+                o.chord_rhythm =
+                    preset_by_name(CHORD_PRESETS, value).ok_or(format!("rythme d'accords inconnu : {value}"))?
+            }
+            "--out-dir" => o.out_dir = PathBuf::from(value),
             _ => return Err(format!("option inconnue : {flag}")),
         }
     }
+    Ok(o)
+}
 
-    let notes: Vec<TimedNote> = load_notes(path)?
+/// Charge le fichier, découpe la progression et estime la tonalité.
+fn load_progression(o: &Options) -> Result<(Vec<TimedNote>, Progression, Scale, bool), String> {
+    let notes: Vec<TimedNote> = load_notes(&o.input)?
         .into_iter()
-        .filter(|n| (min_pitch..=max_pitch).contains(&n.pitch))
+        .filter(|n| (o.min_pitch..=o.max_pitch).contains(&n.pitch))
         .collect();
     if notes.is_empty() {
         return Err("aucune note".into());
     }
     let last = notes.iter().map(|n| n.end).max().unwrap_or(0);
-    let length = match bars {
+    let length = match o.bars {
         Some(b) => b * STEPS_PER_BAR,
         None => last.div_ceil(STEPS_PER_BAR) * STEPS_PER_BAR,
     };
+    let progression = segment(&notes, length);
+    let key = detect_key(&notes, &progression);
+    let (scale, forced) = match o.key {
+        Some(k) => (k, true),
+        None => (key.best().ok_or("tonalité introuvable")?, false),
+    };
+    Ok((notes, progression, scale, forced))
+}
+
+fn analyze(args: &[String]) -> Result<(), String> {
+    let o = parse_options(args)?;
+    let (notes, progression, _, _) = load_progression(&o)?;
     let lo = notes.iter().map(|n| n.pitch).min().unwrap();
     let hi = notes.iter().map(|n| n.pitch).max().unwrap();
-
-    println!("{path}");
+    println!("{}", o.input);
     println!(
         "  {} notes, {} mesures, {} – {}",
         notes.len(),
-        length / STEPS_PER_BAR,
+        progression.length / STEPS_PER_BAR,
         note_name(lo),
         note_name(hi)
     );
-
-    let progression = segment(&notes, length);
     println!("  Progression :");
     for s in &progression.segments {
-        println!(
-            "    {:<8} {:<16} ({})",
-            position(s.start),
-            s.chord.symbol(),
-            duration(s.len())
-        );
+        let beats = s.len() as f32 / STEPS_PER_BEAT as f32;
+        println!("    {:<8} {:<16} ({beats} temps)", position(s.start), s.chord.symbol());
     }
-
     let key = detect_key(&notes, &progression);
     println!("  Tonalité :");
     for k in key.candidates.iter().take(3) {
@@ -134,16 +243,65 @@ fn analyze(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn generate(args: &[String]) -> Result<(), String> {
+    let o = parse_options(args)?;
+    let (_, progression, scale, forced) = load_progression(&o)?;
+    let ctx = Context { progression: &progression, scale };
+    let symbols: Vec<String> = progression.segments.iter().map(|s| s.chord.symbol()).collect();
+    println!(
+        "{} mesures : {}\ntonalité : {}{}",
+        progression.length / STEPS_PER_BAR,
+        symbols.join(" "),
+        scale.name(),
+        if forced { " (imposée)" } else { " (détectée)" }
+    );
+
+    let stem = Path::new(&o.input)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "harmogen".into());
+    std::fs::create_dir_all(&o.out_dir).map_err(|e| format!("{} : {e}", o.out_dir.display()))?;
+
+    let kinds: &[&str] = match o.kind.as_str() {
+        "all" => &["bass", "chords", "melody"],
+        "bass" => &["bass"],
+        "chords" => &["chords"],
+        "melody" => &["melody"],
+        k => return Err(format!("--kind inconnu : {k}")),
+    };
+    for &kind in kinds {
+        // Une graine par ligne, pour que changer l'une ne modifie pas les autres.
+        let mut rng = Rng::new(o.seed.wrapping_mul(31).wrapping_add(kind.len() as u64));
+        let (pattern, detail) = match kind {
+            "bass" => {
+                let p = bass::BassParams { preset: o.bass_rhythm, ..Default::default() };
+                (bass::generate(&ctx, &p, &mut rng), BASS_PRESETS[p.preset].name)
+            }
+            "chords" => {
+                let p = chords::ChordParams { preset: o.chord_rhythm, ..Default::default() };
+                (chords::generate(&ctx, &p, &mut rng), CHORD_PRESETS[p.preset].name)
+            }
+            _ => (melody::generate(&ctx, &melody::MelodyParams::default(), &mut rng), "A–A′"),
+        };
+        let path = o.out_dir.join(format!("{stem}_{kind}_s{}.mid", o.seed));
+        save_pattern(&pattern, &path)?;
+        println!("  {kind:<7} {:>3} notes  ({detail})  → {}", pattern.notes.len(), path.display());
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
-        Some("analyze") => match analyze(&args[1..]) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("erreur : {e}");
-                ExitCode::FAILURE
-            }
-        },
-        _ => usage(),
+    let result = match args.first().map(String::as_str) {
+        Some("analyze") => analyze(&args[1..]),
+        Some("generate") => generate(&args[1..]),
+        _ => return usage(),
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("erreur : {e}");
+            ExitCode::FAILURE
+        }
     }
 }

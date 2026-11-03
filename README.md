@@ -20,6 +20,8 @@ ou des accords rythmés accordés sur cette progression, avec des variations à 
 - **Phase 1 — analyse harmonique** : découpage de la progression au pas de double croche,
   reconnaissance d'accords (renversements, 7e, sus, couleurs add9/add11), estimation de la tonalité
   avec les tonalités relatives proposées comme alternatives.
+- **Phase 2 — générateurs** : basse monophonique, accords rythmés à 3 voix (conduite des voix, couleur 9e),
+  mélodie monophonique A–A′ (pondérations tirées des exemples analysés). Graine déterministe.
 
 ## Analyse d'un fichier MIDI
 
@@ -29,6 +31,16 @@ cargo run -p harmogen-cli --release -- analyze progression.mid --bars 4
 
 Options : `--bars N` (longueur de la boucle), `--min-pitch P` / `--max-pitch P` (filtrer les notes,
 par exemple `--max-pitch 59` pour ne garder que l'accompagnement d'un fichier qui contient aussi une mélodie).
+
+## Générer des lignes
+
+```bash
+cargo run -p harmogen-cli --release -- generate progression.mid --bars 8 --seed 1 --out-dir exports
+```
+
+Produit `<nom>_bass_s1.mid`, `<nom>_chords_s1.mid` et `<nom>_melody_s1.mid`. Options : `--kind bass|chords|melody|all`,
+`--key Bb|Gm|...` (impose la tonalité), `--bass-rhythm NOM`, `--chord-rhythm NOM` (la liste s'affiche sans argument).
+Le dossier `exports/` n'est pas versionné.
 
 ## Plugin
 
