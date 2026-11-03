@@ -15,6 +15,7 @@
 
 use super::rng::Rng;
 use super::{fit_lengths, harmonic_tones, Context, GenNote, Pattern};
+use crate::theory::Role;
 use std::collections::BTreeMap;
 
 /// Type de ligne : fixe ce que la variation a le droit de toucher.
@@ -33,6 +34,9 @@ pub struct VariationParams {
     pub silence: f32,
     /// Probabilité, par attaque, d'un déplacement d'un degré (−1 ou +1).
     pub pitch: f32,
+    /// Probabilité, par passage, qu'un bloc entier (notes groupées entre deux silences)
+    /// soit déplacé d'un degré, son dessin conservé (séquence). Mélodie uniquement.
+    pub block: f32,
     /// Probabilité, par attaque, d'un changement de vélocité…
     pub velocity: f32,
     /// … d'au plus ± ce nombre.
@@ -48,6 +52,7 @@ impl Default for VariationParams {
         Self {
             silence: 0.08,
             pitch: 0.12,
+            block: 0.3,
             velocity: 0.3,
             velocity_range: 10,
             length: 0.15,
@@ -196,6 +201,11 @@ pub fn vary(
         }
     }
 
+    // 2 bis. Un bloc entier ± 1 degré (mélodie).
+    if kind == LineKind::Melody && rng.chance(p.block) {
+        shift_block(&mut g, ctx, &anchor, rng);
+    }
+
     // 3. Vélocité, ramenée vers celle du modèle si elle s'en écarte trop.
     let r = p.velocity_range as i32;
     for group in g.values_mut() {
@@ -228,6 +238,61 @@ pub fn vary(
     notes.sort_by_key(|n| (n.start, n.pitch));
     fit_lengths(&mut notes, length, 1.0);
     Pattern { length, notes }
+}
+
+/// Silence minimal (en pas) qui sépare deux blocs.
+const BLOCK_GAP: u32 = 2;
+
+/// Blocs d'une ligne : attaques consécutives séparées par moins de `BLOCK_GAP` pas de silence.
+fn blocks(g: &BTreeMap<u32, Vec<GenNote>>) -> Vec<Vec<u32>> {
+    let mut out: Vec<Vec<u32>> = Vec::new();
+    let mut last_end: Option<u32> = None;
+    for (&start, group) in g {
+        let end = group.iter().map(|n| n.start + n.len).max().unwrap_or(start);
+        match (out.last_mut(), last_end) {
+            (Some(block), Some(e)) if start < e + BLOCK_GAP => block.push(start),
+            _ => out.push(vec![start]),
+        }
+        last_end = Some(end);
+    }
+    out
+}
+
+/// Déplace un bloc tiré au sort d'un degré, toutes ses notes ensemble (le dessin est conservé).
+/// Le sens choisi est abandonné pour l'autre si une note sortait de l'étendue ou si une note
+/// de temps fort cessait d'être une note de l'accord ; sans sens possible, rien ne bouge.
+fn shift_block(g: &mut BTreeMap<u32, Vec<GenNote>>, ctx: &Context, anchor: &Anchor, rng: &mut Rng) {
+    let all = blocks(g);
+    // Un bloc d'au moins deux notes : déplacer une note isolée, c'est déjà la variation « hauteur ».
+    let candidates: Vec<&Vec<u32>> = all.iter().filter(|b| b.len() >= 2).collect();
+    if candidates.is_empty() {
+        return;
+    }
+    let block = (*rng.pick(&candidates)).clone();
+    let first_dir = if rng.chance(0.5) { 1 } else { -1 };
+    for dir in [first_dir, -first_dir] {
+        let moved: Option<Vec<u8>> = block
+            .iter()
+            .map(|start| {
+                let pitch = ctx.scale.step(g[start][0].pitch, dir);
+                let chord = ctx.chord_at(*start);
+                // Sur un temps fort : note de l'accord, ou couleur courante (7e, 9e) ; jamais la quarte.
+                let pc = pitch % 12;
+                let stable = harmonic_tones(&chord, &ctx.scale).contains(pc)
+                    || matches!(chord.role(pc), Role::Seventh | Role::Ninth);
+                let ok = (anchor.low..=anchor.high).contains(&pitch) && (!is_strong(*start) || stable);
+                ok.then_some(pitch)
+            })
+            .collect();
+        if let Some(pitches) = moved {
+            for (start, pitch) in block.iter().zip(pitches) {
+                if let Some(n) = g.get_mut(start).and_then(|v| v.first_mut()) {
+                    n.pitch = pitch;
+                }
+            }
+            return;
+        }
+    }
 }
 
 /// Nouvelle attaque au pas `at`, dérivée de l'attaque précédente `from`.
@@ -322,10 +387,11 @@ mod tests {
                 assert!(scale.contains(n.pitch % 12));
                 if is_strong(n.start) {
                     let chord = prog.chord_at(n.start).unwrap();
-                    // Une 7e ou 9e écrite par le modèle peut rester ; une note déplacée ou ajoutée, non.
+                    // Note de l'accord, couleur 7e/9e (déplacement de bloc), ou note écrite par le modèle.
                     let from_base = ps[0].notes.iter().any(|b| b.start == n.start && b.pitch == n.pitch);
+                    let color = matches!(chord.role(n.pitch % 12), Role::Seventh | Role::Ninth);
                     assert!(
-                        harmonic_tones(chord, &scale).contains(n.pitch % 12) || from_base,
+                        harmonic_tones(chord, &scale).contains(n.pitch % 12) || color || from_base,
                         "temps fort hors accord au pas {}",
                         n.start
                     );
@@ -358,6 +424,46 @@ mod tests {
             let v = Anchor::of(pat).velocity;
             assert!((v - base_vel).abs() <= 25, "vélocité moyenne {v} (modèle {base_vel})");
         }
+    }
+
+    #[test]
+    fn block_shift_moves_one_whole_block_by_one_degree() {
+        let (prog, scale) = progression(8);
+        let ctx = Context { progression: &prog, scale };
+        let base = melody::generate(&ctx, &Default::default(), &mut Rng::new(11));
+        // Seule la variation de bloc est active.
+        let p = VariationParams { silence: 0.0, pitch: 0.0, block: 1.0, velocity: 0.0, length: 0.0, ..Default::default() };
+        let mut moved_passes = 0;
+        for seed in 0..20 {
+            let next = vary(&base, &base, &ctx, LineKind::Melody, &p, &mut Rng::new(seed));
+            let changed: Vec<(u32, i32)> = base
+                .notes
+                .iter()
+                .zip(&next.notes)
+                .filter(|(a, b)| a.pitch != b.pitch)
+                .map(|(a, b)| {
+                    let dir = if b.pitch == scale.step(a.pitch, 1) {
+                        1
+                    } else if b.pitch == scale.step(a.pitch, -1) {
+                        -1
+                    } else {
+                        0
+                    };
+                    (a.start, dir)
+                })
+                .collect();
+            if changed.is_empty() {
+                continue;
+            }
+            moved_passes += 1;
+            // Toutes les notes déplacées le sont du même degré, et forment un seul bloc.
+            let dir = changed[0].1;
+            assert!(dir == 1 || dir == -1);
+            assert!(changed.iter().all(|c| c.1 == dir), "{changed:?}");
+            let block = blocks(&groups(&base.notes)).into_iter().find(|b| b.contains(&changed[0].0)).unwrap();
+            assert_eq!(changed.len(), block.len(), "tout le bloc, et seulement lui");
+        }
+        assert!(moved_passes >= 10, "{moved_passes}/20");
     }
 
     #[test]

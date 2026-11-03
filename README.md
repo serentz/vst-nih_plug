@@ -61,7 +61,8 @@ Produit `<nom>_bass_s1.mid`, `<nom>_chords_s1.mid` et `<nom>_melody_s1.mid`. Opt
 
 Variations : `--passes N` écrit N passages à la suite dans un seul fichier (passage 1 = modèle).
 Réglages : `--vary-silence`, `--vary-pitch`, `--vary-velocity`, `--vary-length` (probabilités 0–1 par attaque,
-défauts 0.08 / 0.12 / 0.3 / 0.15) et `--reset-every N` (retour au modèle tous les N passages).
+défauts 0.08 / 0.12 / 0.3 / 0.15), `--vary-block` (probabilité par passage de déplacer un bloc entier
+de la mélodie d'un degré, défaut 0.3) et `--reset-every N` (retour au modèle tous les N passages).
 
 Notation des rythmes (16 pas par mesure) : `x` attaque, `-` tenue, `.` silence (`o` octave et `5` quinte pour la basse).
 Le silence est une note à part entière : les rythmes l'écrivent explicitement.

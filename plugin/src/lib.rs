@@ -98,6 +98,8 @@ struct HarmogenParams {
     vary_silence: FloatParam,
     #[id = "vary_pitch"]
     vary_pitch: FloatParam,
+    #[id = "vary_block"]
+    vary_block: FloatParam,
     #[id = "vary_velocity"]
     vary_velocity: FloatParam,
     #[id = "vary_length"]
@@ -130,6 +132,7 @@ impl Default for HarmogenParams {
             seed: IntParam::new("Graine", 1, IntRange::Linear { min: 1, max: 999 }),
             vary_silence: percent("Var. silence", v.silence),
             vary_pitch: percent("Var. hauteur", v.pitch),
+            vary_block: percent("Var. bloc", v.block),
             vary_velocity: percent("Var. vélocité", v.velocity),
             vary_length: percent("Var. durée", v.length),
             reset_every: IntParam::new("Retour au modèle", 0, IntRange::Linear { min: 0, max: 16 })
@@ -203,6 +206,7 @@ impl Harmogen {
             variation: VariationParams {
                 silence: p.vary_silence.value(),
                 pitch: p.vary_pitch.value(),
+                block: p.vary_block.value(),
                 velocity: p.vary_velocity.value(),
                 length: p.vary_length.value(),
                 ..VariationParams::default()

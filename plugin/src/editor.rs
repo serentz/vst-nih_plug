@@ -260,6 +260,7 @@ fn settings(ui: &mut egui::Ui, params: &HarmogenParams, setter: &ParamSetter) {
             for (label, param) in [
                 ("Silence", &params.vary_silence),
                 ("Hauteur ±1", &params.vary_pitch),
+                ("Bloc ±1 (mélodie)", &params.vary_block),
                 ("Vélocité", &params.vary_velocity),
                 ("Durée", &params.vary_length),
             ] {

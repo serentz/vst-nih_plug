@@ -4,7 +4,7 @@
 //! harmogen analyze  <accords.mid> [options]
 //! harmogen generate <accords.mid> [options] [--kind bass|chords|melody|all] [--seed S]
 //!                   [--key Bb|Gm|...] [--bass-rhythm NOM] [--chord-rhythm NOM] [--out-dir DOSSIER]
-//!                   [--passes N] [--vary-silence P] [--vary-pitch P] [--vary-velocity P]
+//!                   [--passes N] [--vary-silence P] [--vary-pitch P] [--vary-block P] [--vary-velocity P]
 //!                   [--vary-length P] [--reset-every N]
 //! ```
 //! Options communes : `--bars N`, `--min-pitch P`, `--max-pitch P`.
@@ -206,6 +206,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             "--passes" => o.passes = (num(value)? as u32).max(1),
             "--vary-silence" => o.variation.silence = prob(value)?,
             "--vary-pitch" => o.variation.pitch = prob(value)?,
+            "--vary-block" => o.variation.block = prob(value)?,
             "--vary-velocity" => o.variation.velocity = prob(value)?,
             "--vary-length" => o.variation.length = prob(value)?,
             "--reset-every" => o.reset_every = num(value)? as u32,
