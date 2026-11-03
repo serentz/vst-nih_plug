@@ -3,7 +3,8 @@
 //! Construction en deux moitiés A – A′ :
 //! - rythme : dans chaque moitié, mesures chargées et aérées en alternance
 //!   (question–réponse), la dernière mesure de la moitié plus calme (cadence) ;
-//!   A′ reprend le rythme de A et change la fin ;
+//!   A′ reprend le rythme de A et change la fin ; le silence fait partie du dessin
+//!   (départs différés, respirations en fin de phrase, notes de temps faible retirées) ;
 //! - hauteurs : A′ reprend aussi les hauteurs de A, recorrigées si l'accord change ;
 //!   ailleurs, chaque note est tirée au sort parmi les notes de la gamme, avec des
 //!   poids tirés des exemples analysés.
@@ -14,7 +15,7 @@
 
 use super::rhythm::{parse_bar, STEPS_PER_BAR};
 use super::rng::Rng;
-use super::{apply_gate, harmonic_tones, Context, GenNote, Pattern};
+use super::{fit_lengths, harmonic_tones, Context, GenNote, Pattern};
 use crate::theory::{Chord, Role};
 
 #[derive(Clone, Copy, Debug)]
@@ -22,30 +23,62 @@ pub struct MelodyParams {
     /// Étendue (MIDI). Défaut D3–G4 (convention Live), environ une octave et demie.
     pub low: u8,
     pub high: u8,
-    pub gate: f32,
+    /// Respiration : probabilité de remplacer une note de temps faible par un silence.
+    pub rests: f32,
     pub velocity: u8,
 }
 
 impl Default for MelodyParams {
     fn default() -> Self {
-        Self { low: 62, high: 79, gate: 0.9, velocity: 62 }
+        Self { low: 62, high: 79, rests: 0.2, velocity: 62 }
     }
 }
 
-/// Mesures chargées (croches).
+// Cellules d'une mesure (voir la notation dans `rhythm`) : `-` tenue, `.` silence.
+
+/// Mesures chargées (croches), chacune avec sa respiration (trou, départ différé, fin courte).
 const DENSE: &[&str] = &[
-    "x.x.x.x.x.x.x.x.",
-    "x.x.x.x...x.x.x.",
-    "x.x.x.x.x.x.x...",
-    "x.x...x.x.x.x...",
-    "x.x.x.x.x...x...",
+    "x-x-x-x-x-x-x-..",
+    "x-x-x-x-..x-x-x.",
+    "x-x-..x-x-x-x-..",
+    "..x-x-x-x-x-x---",
+    "x-x-x-x.x.x---..",
+    "x.x.x-x-x-x-..x-",
 ];
-/// Mesures aérées (réponse, respiration).
-const SPARSE: &[&str] = &["x...x...x.......", "x.....x.....x...", "x...x.x.x.......", "x.x.x...x......."];
-/// Fin de la première moitié (question).
-const CADENCE: &[&str] = &["x...x...x...x...", "x.......x...x...", "x...x...x......."];
-/// Dernière mesure de la boucle (conclusion).
-const FINAL: &[&str] = &["x...x...x.......", "x.......x.......", "x...x...x...x..."];
+/// Mesures aérées (réponse) ; la dernière prépare une anacrouse vers la mesure suivante.
+const SPARSE: &[&str] = &[
+    "x---x---x---....",
+    "x-----x-----....",
+    "x---x-x-x---....",
+    "x-x-x---........",
+    "x-----..x-..x-x-",
+];
+/// Fin de la première moitié (question), suivie d'une respiration.
+const CADENCE: &[&str] = &["x---x---x---....", "x-------x---....", "x---x---x-......"];
+/// Dernière mesure de la boucle (conclusion), qui laisse respirer avant la reprise.
+const FINAL: &[&str] = &["x---x---x-----..", "x-------x-......", "x---x---x---...."];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CellKind {
+    Dense,
+    Sparse,
+    Cadence,
+    Final,
+}
+
+/// Remplace au hasard des notes de temps faible par des silences (jamais la première
+/// note de la mesure ni une note sur le temps 1 ou 3).
+fn breathe(cell: &str, amount: f32, rng: &mut Rng) -> String {
+    let mut chars: Vec<char> = cell.chars().collect();
+    for o in parse_bar(cell) {
+        if o.step != 0 && o.step % 8 != 0 && rng.chance(amount) {
+            for c in &mut chars[o.step as usize..(o.step + o.len) as usize] {
+                *c = '.';
+            }
+        }
+    }
+    chars.into_iter().collect()
+}
 
 /// Place d'une note dans la phrase.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -58,30 +91,44 @@ enum Place {
 }
 
 /// Rythme de chaque mesure.
-fn bar_rhythms(bars: u32, rng: &mut Rng) -> Vec<&'static str> {
+fn bar_rhythms(bars: u32, rests: f32, rng: &mut Rng) -> Vec<String> {
     let half = (bars / 2).max(1);
-    let mut cells: Vec<&'static str> = Vec::with_capacity(bars as usize);
+    let mut cells: Vec<(CellKind, String)> = Vec::with_capacity(bars as usize);
     for b in 0..bars {
+        let fresh = |kind: CellKind, rng: &mut Rng| {
+            let pool = match kind {
+                CellKind::Dense => DENSE,
+                CellKind::Sparse => SPARSE,
+                CellKind::Cadence => CADENCE,
+                CellKind::Final => FINAL,
+            };
+            let cell = *rng.pick(pool);
+            let cell = match kind {
+                CellKind::Dense | CellKind::Sparse => breathe(cell, rests, rng),
+                _ => cell.to_string(),
+            };
+            (kind, cell)
+        };
         let cell = if b == bars - 1 {
-            *rng.pick(FINAL)
+            fresh(CellKind::Final, rng)
         } else if b >= half {
-            // A′ : même rythme que A, avec une variation de temps en temps.
-            let src = cells[(b - half) as usize];
+            // A′ : même rythme que A (silences compris), avec une variation de temps en temps.
+            let (kind, src) = cells[(b - half) as usize].clone();
             if rng.chance(0.25) {
-                *rng.pick(if DENSE.contains(&src) { DENSE } else { SPARSE })
+                fresh(kind, rng)
             } else {
-                src
+                (kind, src)
             }
         } else if b == half - 1 {
-            *rng.pick(CADENCE)
+            fresh(CellKind::Cadence, rng)
         } else if b % 2 == 0 {
-            *rng.pick(DENSE)
+            fresh(CellKind::Dense, rng)
         } else {
-            *rng.pick(SPARSE)
+            fresh(CellKind::Sparse, rng)
         };
         cells.push(cell);
     }
-    cells
+    cells.into_iter().map(|(_, c)| c).collect()
 }
 
 /// Poids d'une note sur un temps fort selon sa fonction dans l'accord.
@@ -167,14 +214,16 @@ pub fn generate(ctx: &Context, p: &MelodyParams, rng: &mut Rng) -> Pattern {
     let bars = length.div_ceil(STEPS_PER_BAR).max(1);
     let half = (bars / 2).max(1);
     let half_len = half * STEPS_PER_BAR;
-    let cells = bar_rhythms(bars, rng);
+    let cells = bar_rhythms(bars, p.rests, rng);
 
-    let onsets: Vec<u32> = cells
+    // (début, durée écrite) de chaque note ; les silences sont les trous entre elles.
+    let notes_at: Vec<(u32, u32)> = cells
         .iter()
         .enumerate()
-        .flat_map(|(b, cell)| parse_bar(cell).into_iter().map(move |(s, _)| b as u32 * STEPS_PER_BAR + s))
-        .filter(|&s| s < length)
+        .flat_map(|(b, cell)| parse_bar(cell).into_iter().map(move |o| (b as u32 * STEPS_PER_BAR + o.step, o.len)))
+        .filter(|&(s, _)| s < length)
         .collect();
+    let onsets: Vec<u32> = notes_at.iter().map(|n| n.0).collect();
     let question_end = onsets.iter().rposition(|&s| s < half_len).filter(|_| bars > 1);
 
     let center = (p.low as f32 + p.high as f32) / 2.0;
@@ -182,8 +231,7 @@ pub fn generate(ctx: &Context, p: &MelodyParams, rng: &mut Rng) -> Pattern {
     let mut pitches: Vec<u8> = Vec::with_capacity(onsets.len());
     let mut last_move = 0;
     for (i, &start) in onsets.iter().enumerate() {
-        let next = onsets.get(i + 1).copied().unwrap_or(length);
-        let strong = start % 8 == 0 || next - start >= 6;
+        let strong = start % 8 == 0 || notes_at[i].1 >= 6;
         let chord = ctx.chord_at(start);
         let previous = pitches.last().copied();
         let bar = start / STEPS_PER_BAR;
@@ -234,20 +282,16 @@ pub fn generate(ctx: &Context, p: &MelodyParams, rng: &mut Rng) -> Pattern {
         pitches.push(pitch);
     }
 
-    let mut notes: Vec<GenNote> = onsets
+    let mut notes: Vec<GenNote> = notes_at
         .iter()
         .zip(&pitches)
-        .map(|(&start, &pitch)| {
+        .map(|(&(start, len), &pitch)| {
             let accent = if start % 8 == 0 { 6 } else { 0 };
             let vel = (p.velocity as i32 + accent + rng.range(-6, 6)).clamp(1, 127) as u8;
-            GenNote { start, len: 0, pitch, velocity: vel }
+            GenNote { start, len, pitch, velocity: vel }
         })
         .collect();
-    apply_gate(&mut notes, length, p.gate);
-    // La note finale est tenue jusqu'au bout de la boucle.
-    if let Some(last) = notes.last_mut() {
-        last.len = length - last.start;
-    }
+    fit_lengths(&mut notes, length, 1.0);
     Pattern { length, notes }
 }
 
@@ -279,6 +323,14 @@ mod tests {
                 assert!((p.low..=p.high).contains(&n.pitch));
                 assert!(crate::theory::Scale::new(10, crate::theory::Mode::Major).contains(n.pitch % 12));
             }
+        }
+    }
+
+    #[test]
+    fn melody_breathes() {
+        for (pat, _) in melodies(8, 20) {
+            let sounding: u32 = pat.notes.iter().map(|n| n.len).sum();
+            assert!(sounding * 100 / pat.length <= 85, "{sounding}/{}", pat.length);
         }
     }
 

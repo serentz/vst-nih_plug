@@ -40,6 +40,9 @@ cargo run -p harmogen-cli --release -- generate progression.mid --bars 8 --seed 
 
 Produit `<nom>_bass_s1.mid`, `<nom>_chords_s1.mid` et `<nom>_melody_s1.mid`. Options : `--kind bass|chords|melody|all`,
 `--key Bb|Gm|...` (impose la tonalité), `--bass-rhythm NOM`, `--chord-rhythm NOM` (la liste s'affiche sans argument).
+
+Notation des rythmes (16 pas par mesure) : `x` attaque, `-` tenue, `.` silence (`o` octave et `5` quinte pour la basse).
+Le silence est une note à part entière : les rythmes l'écrivent explicitement.
 Le dossier `exports/` n'est pas versionné.
 
 ## Plugin

@@ -1,12 +1,12 @@
 //! Accords rythmés à 3 voix.
 //!
 //! D'après les exemples : voicing serré, mouvement minimal d'un accord à l'autre
-//! (1 à 3 demi-tons par voix en moyenne), accord tenu jusqu'à l'attaque suivante,
-//! et note du haut qui alterne avec la 9e sur les attaques répétées d'un même accord.
+//! (1 à 3 demi-tons par voix en moyenne), et note du haut qui alterne avec la 9e
+//! sur les attaques répétées d'un même accord. Les durées et les silences viennent du rythme.
 
 use super::rhythm::CHORD_PRESETS;
 use super::rng::Rng;
-use super::{apply_gate, harmonic_tones, velocity, Context, GenNote, Pattern};
+use super::{fit_lengths, harmonic_tones, velocity, Context, GenNote, Pattern};
 use crate::theory::{Chord, PitchClass, Quality, Scale};
 
 #[derive(Clone, Copy, Debug)]
@@ -101,18 +101,23 @@ fn lead_voices(pcs: &[PitchClass], previous: Option<&[u8]>, low: u8, high: u8) -
 pub fn generate(ctx: &Context, p: &ChordParams, rng: &mut Rng) -> Pattern {
     let length = ctx.progression.length;
     let preset = &CHORD_PRESETS[p.preset % CHORD_PRESETS.len()];
-    let mut onsets: Vec<u32> = preset.hits(length).into_iter().map(|(s, _)| s).collect();
+    // (pas, durée écrite ; 0 = attaque ajoutée sur un changement d'accord)
+    let mut onsets: Vec<(u32, u32)> = preset.hits(length).into_iter().map(|o| (o.step, o.len)).collect();
     if p.follow_changes {
-        onsets.extend(ctx.chord_changes());
+        for change in ctx.chord_changes() {
+            if !onsets.iter().any(|o| o.0 == change) {
+                onsets.push((change, 0));
+            }
+        }
     }
     onsets.sort_unstable();
-    onsets.dedup();
+    onsets.dedup_by_key(|o| o.0);
 
     let mut notes = Vec::new();
     let mut voicing: Option<Vec<u8>> = None;
     let mut current: Option<Chord> = None;
     let mut repeat = 0usize;
-    for &step in &onsets {
+    for &(step, len) in &onsets {
         let chord = ctx.chord_at(step);
         if current.map_or(true, |c| !c.same_harmony(&chord)) {
             let pcs = chord_pcs(&chord, &ctx.scale, p.voices);
@@ -142,10 +147,10 @@ pub fn generate(ctx: &Context, p: &ChordParams, rng: &mut Rng) -> Pattern {
         let vel = velocity(rng, p.velocity, step, 5);
         for &pitch in &played {
             let v = (vel as i32 + rng.range(-3, 3)).clamp(1, 127) as u8;
-            notes.push(GenNote { start: step, len: 0, pitch, velocity: v });
+            notes.push(GenNote { start: step, len, pitch, velocity: v });
         }
     }
-    apply_gate(&mut notes, length, p.gate);
+    fit_lengths(&mut notes, length, p.gate);
     Pattern { length, notes }
 }
 

@@ -4,9 +4,9 @@
 //! sautant à l'octave ; une attaque à chaque changement d'accord, même syncopé ;
 //! la dernière mesure du cycle relance (« fill ») vers le premier accord.
 
-use super::rhythm::{parse_bar, Hit, BASS_FILL, BASS_PRESETS, STEPS_PER_BAR};
+use super::rhythm::{parse_bar, Hit, Onset, BASS_FILL, BASS_PRESETS, STEPS_PER_BAR};
 use super::rng::Rng;
-use super::{apply_gate, nearest_pitch, velocity, Context, GenNote, Pattern};
+use super::{fit_lengths, nearest_pitch, velocity, Context, GenNote, Pattern};
 
 #[derive(Clone, Copy, Debug)]
 pub struct BassParams {
@@ -19,7 +19,8 @@ pub struct BassParams {
     pub fill_last_bar: bool,
     /// Ajoute une attaque à chaque changement d'accord absent du rythme.
     pub follow_changes: bool,
-    /// Proportion de la durée jusqu'à l'attaque suivante (1 = legato).
+    /// Durée des attaques ajoutées aux changements d'accord, en proportion de l'écart
+    /// jusqu'à l'attaque suivante (les rythmes écrivent eux-mêmes leurs durées et silences).
     pub gate: f32,
     pub velocity: u8,
 }
@@ -46,24 +47,24 @@ pub fn generate(ctx: &Context, p: &BassParams, rng: &mut Rng) -> Pattern {
     let fill_start = (length >= 2 * STEPS_PER_BAR && p.fill_last_bar)
         .then(|| (length - 1) / STEPS_PER_BAR * STEPS_PER_BAR);
     if let Some(start) = fill_start {
-        hits.retain(|(s, _)| *s < start);
-        hits.extend(parse_bar(BASS_FILL).into_iter().map(|(s, h)| (start + s, h)));
+        hits.retain(|o| o.step < start);
+        hits.extend(parse_bar(BASS_FILL).into_iter().map(|o| Onset { step: start + o.step, ..o }));
     }
     if p.follow_changes {
         for change in ctx.chord_changes() {
-            if !hits.iter().any(|(s, _)| *s == change) {
-                hits.push((change, Hit::Note));
+            if !hits.iter().any(|o| o.step == change) {
+                hits.push(Onset { step: change, hit: Hit::Note, len: 0 });
             }
         }
     }
-    hits.sort_by_key(|h| h.0);
-    hits.dedup_by_key(|h| h.0);
+    hits.sort_by_key(|o| o.step);
+    hits.dedup_by_key(|o| o.step);
 
     let center = ((p.low as u16 + p.high as u16) / 2) as u8;
     let mut notes = Vec::with_capacity(hits.len());
     let mut root_pitch = center;
     let mut current_root = None;
-    for (i, &(step, hit)) in hits.iter().enumerate() {
+    for (i, &Onset { step, hit, len }) in hits.iter().enumerate() {
         let chord = ctx.chord_at(step);
         if current_root != Some(chord.root) {
             // Fondamentale la plus proche de la précédente : mouvement de basse minimal.
@@ -87,12 +88,12 @@ pub fn generate(ctx: &Context, p: &BassParams, rng: &mut Rng) -> Pattern {
 
         notes.push(GenNote {
             start: step,
-            len: 0,
+            len,
             pitch,
             velocity: velocity(rng, p.velocity, step, 5),
         });
     }
-    apply_gate(&mut notes, length, p.gate);
+    fit_lengths(&mut notes, length, p.gate);
     Pattern { length, notes }
 }
 

@@ -65,16 +65,20 @@ pub fn harmonic_tones(chord: &Chord, scale: &Scale) -> PcSet {
     tones
 }
 
-/// Durée de chaque note = écart jusqu'à l'attaque suivante (toutes notes confondues) × `gate`.
-/// Garantit qu'une ligne monophonique ne se chevauche jamais.
-pub(crate) fn apply_gate(notes: &mut [GenNote], length: u32, gate: f32) {
+/// Ajuste les durées : une note sans durée écrite (`len` = 0) dure jusqu'à l'attaque
+/// suivante × `gate` ; aucune note ne dépasse l'attaque suivante (toutes notes confondues),
+/// ce qui garantit qu'une ligne monophonique ne se chevauche jamais.
+pub(crate) fn fit_lengths(notes: &mut [GenNote], length: u32, gate: f32) {
     let mut starts: Vec<u32> = notes.iter().map(|n| n.start).collect();
     starts.sort_unstable();
     starts.dedup();
     for n in notes.iter_mut() {
         let next = starts.iter().copied().find(|&s| s > n.start).unwrap_or(length);
         let span = next.saturating_sub(n.start).max(1);
-        n.len = ((span as f32 * gate).round() as u32).clamp(1, span);
+        if n.len == 0 {
+            n.len = (span as f32 * gate).round() as u32;
+        }
+        n.len = n.len.clamp(1, span);
     }
 }
 
