@@ -231,8 +231,9 @@ dependencies = [
 
 [[package]]
 name = "harmogen"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
+ "harmony-core",
  "nih_plug",
 ]
 

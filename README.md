@@ -63,15 +63,25 @@ Le bundle est créé dans `target/bundled/harmogen.vst3` ; copier ce dossier dan
 `C:\Program Files\Common Files\VST3\`.
 
 Routage dans Live :
-1. Piste 1 : charger `Harmogen Spike` et un clip d'accords.
+1. Piste 1 : charger `Harmogen` et le clip de la progression d'accords.
 2. Piste 2 : un synthé, *MIDI From* = `1-Piste 1`, puis dans le second menu **le nom de l'instance du plugin**
    (pas `Post FX`, qui ne transmet que les notes du clip), *Monitor* = `In`.
 
-Paramètre `Mode` du prototype : `Pulse` (un C4 Live sur chaque temps, pour vérifier le routage) ou `Echo`
-(notes reçues renvoyées avec la transposition `Transpose`).
+Fonctionnement :
+1. Lancer la lecture : la capture commence au premier début de mesure (ou tout de suite si la lecture
+   démarre sur une mesure) et dure la `Longueur` choisie (4, 8 ou 16 mesures). Rien ne sort pendant ce tour.
+2. Au tour suivant, Harmogen joue le modèle, puis une variation du passage précédent à chaque tour.
+3. Changer un réglage (ligne, rythme, tonalité, graine, variations) : pris en compte au tour suivant.
+4. `Réapprendre` (passer à On) : nouvelle capture au prochain début de mesure.
+
+Paramètres : `Ligne` (Mélodie, Basse, Accords), `Longueur`, `Tonalité` (Auto ou imposée), `Rythme basse`,
+`Rythme accords`, `Graine`, `Var. silence` / `Var. hauteur` / `Var. vélocité` / `Var. durée`,
+`Retour au modèle` (jamais ou tous les N tours), `Réapprendre`, `Renvoyer l'entrée` (laisse aussi passer les accords).
+
+Journal : `%TEMP%\harmogen.log` (progression reconnue, tonalité, changements d'état).
 
 ## Tests
 
 ```bash
-cargo test -p harmony-core
+cargo test -p harmony-core -p harmogen
 ```

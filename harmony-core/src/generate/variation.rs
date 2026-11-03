@@ -27,7 +27,7 @@ pub enum LineKind {
 }
 
 /// Réglages de variation (choisis dans l'interface). Une probabilité à 0 désactive l'élément.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VariationParams {
     /// Probabilité, par attaque, d'un changement silence ↔ note.
     pub silence: f32,
