@@ -22,6 +22,10 @@ ou des accords rythmés accordés sur cette progression, avec des variations à 
   avec les tonalités relatives proposées comme alternatives.
 - **Phase 2 — générateurs** : basse monophonique, accords rythmés à 3 voix (conduite des voix, couleur 9e),
   mélodie monophonique A–A′ (pondérations tirées des exemples analysés). Graine déterministe.
+- **Phase 3 — variations** : à partir du deuxième passage, chaque rendu varie le précédent
+  (silence ↔ note, hauteur ±1 degré, vélocité ±, durée ±), avec garde-fous harmoniques
+  (temps forts sur notes de l'accord, fondamentale de basse aux changements, densité et étendue
+  ancrées sur le modèle). 1 ou 2 rendus sont toujours calculés à l'avance (`PassEngine`).
 
 ## Analyse d'un fichier MIDI
 
@@ -40,6 +44,10 @@ cargo run -p harmogen-cli --release -- generate progression.mid --bars 8 --seed 
 
 Produit `<nom>_bass_s1.mid`, `<nom>_chords_s1.mid` et `<nom>_melody_s1.mid`. Options : `--kind bass|chords|melody|all`,
 `--key Bb|Gm|...` (impose la tonalité), `--bass-rhythm NOM`, `--chord-rhythm NOM` (la liste s'affiche sans argument).
+
+Variations : `--passes N` écrit N passages à la suite dans un seul fichier (passage 1 = modèle).
+Réglages : `--vary-silence`, `--vary-pitch`, `--vary-velocity`, `--vary-length` (probabilités 0–1 par attaque,
+défauts 0.08 / 0.12 / 0.3 / 0.15) et `--reset-every N` (retour au modèle tous les N passages).
 
 Notation des rythmes (16 pas par mesure) : `x` attaque, `-` tenue, `.` silence (`o` octave et `5` quinte pour la basse).
 Le silence est une note à part entière : les rythmes l'écrivent explicitement.

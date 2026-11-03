@@ -4,13 +4,17 @@
 //! harmogen analyze  <accords.mid> [options]
 //! harmogen generate <accords.mid> [options] [--kind bass|chords|melody|all] [--seed S]
 //!                   [--key Bb|Gm|...] [--bass-rhythm NOM] [--chord-rhythm NOM] [--out-dir DOSSIER]
+//!                   [--passes N] [--vary-silence P] [--vary-pitch P] [--vary-velocity P]
+//!                   [--vary-length P] [--reset-every N]
 //! ```
 //! Options communes : `--bars N`, `--min-pitch P`, `--max-pitch P`.
 
 use harmony_core::analysis::{detect_key, segment, Progression, TimedNote};
 use harmony_core::generate::rhythm::{preset_by_name, BASS_PRESETS, CHORD_PRESETS};
+use harmony_core::generate::engine::PassEngine;
 use harmony_core::generate::rng::Rng;
-use harmony_core::generate::{bass, chords, melody, Context, Pattern};
+use harmony_core::generate::variation::{LineKind, VariationParams};
+use harmony_core::generate::{bass, chords, melody, Context, GenNote, Pattern};
 use harmony_core::theory::{note_name, Mode, Scale, NOTE_NAMES};
 use harmony_core::STEPS_PER_BEAT;
 use midly::num::{u15, u28, u4, u7};
@@ -27,7 +31,9 @@ fn usage() -> ExitCode {
     eprintln!(
         "usage :\n  harmogen analyze  <accords.mid> [--bars N] [--min-pitch P] [--max-pitch P]\n  \
          harmogen generate <accords.mid> [--bars N] [--kind bass|chords|melody|all] [--seed S]\n                    \
-         [--key Bb|Gm|...] [--bass-rhythm NOM] [--chord-rhythm NOM] [--out-dir DOSSIER]\n\n\
+         [--key Bb|Gm|...] [--bass-rhythm NOM] [--chord-rhythm NOM] [--out-dir DOSSIER]\n                    \
+         [--passes N] [--vary-silence P] [--vary-pitch P] [--vary-velocity P] [--vary-length P]\n                    \
+         [--reset-every N]\n\n\
          rythmes de basse : {}\nrythmes d'accords : {}",
         BASS_PRESETS.iter().map(|p| p.name).collect::<Vec<_>>().join(", "),
         CHORD_PRESETS.iter().map(|p| p.name).collect::<Vec<_>>().join(", "),
@@ -150,6 +156,9 @@ struct Options {
     bass_rhythm: usize,
     chord_rhythm: usize,
     out_dir: PathBuf,
+    passes: u32,
+    variation: VariationParams,
+    reset_every: u32,
 }
 
 fn parse_options(args: &[String]) -> Result<Options, String> {
@@ -164,11 +173,20 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         bass_rhythm: 0,
         chord_rhythm: 0,
         out_dir: PathBuf::from("."),
+        passes: 1,
+        variation: VariationParams::default(),
+        reset_every: 0,
     };
     let mut it = args[1..].iter();
     while let Some(flag) = it.next() {
         let value = it.next().ok_or(format!("valeur manquante pour {flag}"))?;
         let num = |v: &str| v.parse::<u64>().map_err(|_| format!("{flag} : nombre attendu"));
+        let prob = |v: &str| {
+            v.parse::<f32>()
+                .ok()
+                .filter(|x| (0.0..=1.0).contains(x))
+                .ok_or(format!("{flag} : probabilité entre 0 et 1 attendue"))
+        };
         match flag.as_str() {
             "--bars" => o.bars = Some(num(value)? as u32),
             "--min-pitch" => o.min_pitch = num(value)?.min(127) as u8,
@@ -184,6 +202,12 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
                     preset_by_name(CHORD_PRESETS, value).ok_or(format!("rythme d'accords inconnu : {value}"))?
             }
             "--out-dir" => o.out_dir = PathBuf::from(value),
+            "--passes" => o.passes = (num(value)? as u32).max(1),
+            "--vary-silence" => o.variation.silence = prob(value)?,
+            "--vary-pitch" => o.variation.pitch = prob(value)?,
+            "--vary-velocity" => o.variation.velocity = prob(value)?,
+            "--vary-length" => o.variation.length = prob(value)?,
+            "--reset-every" => o.reset_every = num(value)? as u32,
             _ => return Err(format!("option inconnue : {flag}")),
         }
     }
@@ -283,9 +307,35 @@ fn generate(args: &[String]) -> Result<(), String> {
             }
             _ => (melody::generate(&ctx, &melody::MelodyParams::default(), &mut rng), "A–A′"),
         };
-        let path = o.out_dir.join(format!("{stem}_{kind}_s{}.mid", o.seed));
-        save_pattern(&pattern, &path)?;
-        println!("  {kind:<7} {:>3} notes  ({detail})  → {}", pattern.notes.len(), path.display());
+        let line_kind = match kind {
+            "bass" => LineKind::Bass,
+            "chords" => LineKind::Chords,
+            _ => LineKind::Melody,
+        };
+        // Passage 1 = modèle, puis une variation du précédent à chaque passage.
+        let mut engine = PassEngine::new(
+            progression.clone(),
+            scale,
+            line_kind,
+            pattern,
+            o.variation,
+            o.seed.wrapping_mul(7919).wrapping_add(kind.len() as u64),
+            2,
+        );
+        engine.reset_every = o.reset_every;
+        let mut all = Pattern { length: 0, notes: Vec::new() };
+        let mut counts = Vec::new();
+        for _ in 0..o.passes {
+            let pass = engine.next_pass();
+            counts.push(pass.notes.len().to_string());
+            let offset = all.length;
+            all.notes.extend(pass.notes.iter().map(|n| GenNote { start: n.start + offset, ..*n }));
+            all.length += pass.length;
+        }
+        let suffix = if o.passes > 1 { format!("_x{}", o.passes) } else { String::new() };
+        let path = o.out_dir.join(format!("{stem}_{kind}_s{}{suffix}.mid", o.seed));
+        save_pattern(&all, &path)?;
+        println!("  {kind:<7} notes par passage {}  ({detail})  → {}", counts.join("/"), path.display());
     }
     Ok(())
 }

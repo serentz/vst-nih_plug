@@ -5,9 +5,11 @@
 
 pub mod bass;
 pub mod chords;
+pub mod engine;
 pub mod melody;
 pub mod rhythm;
 pub mod rng;
+pub mod variation;
 
 use crate::analysis::Progression;
 use crate::theory::{Chord, PcSet, Quality, Scale};
