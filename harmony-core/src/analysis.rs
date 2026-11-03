@@ -43,6 +43,9 @@ pub fn recognize(weights: &PcWeights, bass: Option<PitchClass>) -> Option<Chord>
     recognize_with_bias(weights, bass, None)
 }
 
+/// Bonus donné au candidat dont la fondamentale est à la basse.
+const BASS_ROOT_BONUS: f32 = 1.0;
+
 /// Bonus donné à la fondamentale de l'accord en cours : une note de couleur
 /// passagère (Eb6 ↔ Cm7 sur la même basse) ne fait pas basculer l'analyse.
 const CURRENT_ROOT_BONUS: f32 = 0.8;
@@ -60,6 +63,8 @@ fn recognize_with_bias(
     let present = PcSet::from_pcs((0..12).filter(|&pc| w[pc as usize] > 0.0));
 
     let mut best: Option<(f32, Chord)> = None;
+    // Meilleur candidat dont la fondamentale est la basse.
+    let mut best_on_bass: Option<(f32, Chord)> = None;
     for root in 0..12u8 {
         for quality in Quality::ALL {
             let tones = PcSet::from_intervals(root, quality.intervals());
@@ -86,15 +91,18 @@ fn recognize_with_bias(
                 };
                 score -= w[pc as usize] * penalty;
             }
+            // Une basse sur la fondamentale est l'indice le plus fiable (accords à l'état fondamental).
             if bass == Some(root) {
-                score += 0.6;
+                score += BASS_ROOT_BONUS;
             }
             if current_root == Some(root) {
                 score += CURRENT_ROOT_BONUS;
             }
             score -= quality.complexity() * 0.15;
 
-            if best.as_ref().map_or(true, |(s, _)| score > *s) {
+            let beats = |slot: &Option<(f32, Chord)>| slot.as_ref().map_or(true, |(s, _)| score > *s);
+            let on_bass = bass == Some(root);
+            if beats(&best) || (on_bass && beats(&best_on_bass)) {
                 let mut chord = Chord::new(root, quality);
                 chord.bass = bass.unwrap_or(root);
                 chord.extensions = PcSet::from_pcs(present.iter().filter(|&pc| {
@@ -102,12 +110,25 @@ fn recognize_with_bias(
                         && matches!(interval(root, pc), 2 | 5 | 9)
                         && w[pc as usize] >= EXTENSION_THRESHOLD
                 }));
-                best = Some((score, chord));
+                if on_bass && beats(&best_on_bass) {
+                    best_on_bass = Some((score, chord));
+                }
+                if beats(&best) {
+                    best = Some((score, chord));
+                }
             }
         }
     }
-    best.map(|(_, c)| c)
+    // Une basse étrangère à l'accord retenu (Fmaj7 sur G) est presque toujours la vraie
+    // fondamentale (G11) : on la préfère si son meilleur candidat n'est pas loin derrière.
+    match (best, best_on_bass, bass) {
+        (Some((s, c)), Some((sb, cb)), Some(b)) if !c.tones().contains(b) && s - sb < FOREIGN_BASS_TOLERANCE => Some(cb),
+        (best, _, _) => best.map(|(_, c)| c),
+    }
 }
+
+/// Écart de score toléré pour préférer la basse comme fondamentale quand elle est étrangère à l'accord.
+const FOREIGN_BASS_TOLERANCE: f32 = 1.5;
 
 /// Accord occupant l'intervalle de pas `[start, end)`.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -173,6 +194,7 @@ pub fn segment(notes: &[TimedNote], length: u32) -> Progression {
     // (début, fondamentale reconnue à l'attaque)
     let mut cuts: Vec<(u32, Option<PitchClass>)> = vec![(0, None)];
     let mut current_root: Option<PitchClass> = None;
+    let mut current_third: Option<u8> = None;
     let mut current_bass: Option<PitchClass> = None;
 
     let mut onsets: Vec<u32> = notes.iter().map(|n| n.start).filter(|&s| s < length).collect();
@@ -187,12 +209,20 @@ pub fn segment(notes: &[TimedNote], length: u32) -> Progression {
         // sinon deux accords voisins (Bb et Gm7, trois notes communes) seraient confondus.
         let bias = if bass == current_bass { current_root } else { None };
         let Some(chord) = recognize_with_bias(&w, bass, bias) else { continue };
+        // Tierce entendue (3 = mineure, 4 = majeure) : Dm → D sur la même fondamentale est un changement.
+        let third = chord.quality.intervals().iter().copied().find(|&i| i == 3 || i == 4);
         match current_root {
             None => cuts[0].1 = Some(chord.root),
             Some(r) if r != chord.root => cuts.push((step, Some(chord.root))),
+            Some(_) if third.is_some() && current_third.is_some() && third != current_third => {
+                cuts.push((step, Some(chord.root)))
+            }
             _ => {}
         }
         current_root = Some(chord.root);
+        if third.is_some() {
+            current_third = third;
+        }
         current_bass = bass;
     }
 

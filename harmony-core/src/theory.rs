@@ -84,6 +84,8 @@ pub enum Quality {
     Augmented,
     Sus2,
     Sus4,
+    /// Quarte et septième mineure, sans tierce (D G A C).
+    Sus4Seventh,
     /// Fondamentale + quinte, sans tierce.
     Power,
     Major7,
@@ -96,13 +98,14 @@ pub enum Quality {
 }
 
 impl Quality {
-    pub const ALL: [Quality; 14] = [
+    pub const ALL: [Quality; 15] = [
         Quality::Major,
         Quality::Minor,
         Quality::Diminished,
         Quality::Augmented,
         Quality::Sus2,
         Quality::Sus4,
+        Quality::Sus4Seventh,
         Quality::Power,
         Quality::Major7,
         Quality::Minor7,
@@ -121,6 +124,7 @@ impl Quality {
             Quality::Augmented => &[0, 4, 8],
             Quality::Sus2 => &[0, 2, 7],
             Quality::Sus4 => &[0, 5, 7],
+            Quality::Sus4Seventh => &[0, 5, 7, 10],
             Quality::Power => &[0, 7],
             Quality::Major7 => &[0, 4, 7, 11],
             Quality::Minor7 => &[0, 3, 7, 10],
@@ -140,6 +144,7 @@ impl Quality {
             Quality::Augmented => "aug",
             Quality::Sus2 => "sus2",
             Quality::Sus4 => "sus4",
+            Quality::Sus4Seventh => "7sus4",
             Quality::Power => "5",
             Quality::Major7 => "maj7",
             Quality::Minor7 => "m7",
@@ -158,6 +163,7 @@ impl Quality {
             Quality::Power => 0.2,
             Quality::Sus2 | Quality::Sus4 => 0.4,
             Quality::Minor7 | Quality::Dominant7 | Quality::Major7 => 0.5,
+            Quality::Sus4Seventh => 0.6,
             Quality::Diminished | Quality::Major6 | Quality::Minor6 => 0.7,
             Quality::HalfDiminished7 => 0.8,
             Quality::Augmented | Quality::Diminished7 => 1.0,

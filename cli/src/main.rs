@@ -15,7 +15,8 @@ use harmony_core::generate::engine::PassEngine;
 use harmony_core::generate::rng::Rng;
 use harmony_core::generate::variation::{LineKind, VariationParams};
 use harmony_core::generate::{bass, chords, melody, Context, GenNote, Pattern};
-use harmony_core::theory::{note_name, Mode, Scale, NOTE_NAMES};
+use harmony_core::library::{parse_chord_name, parse_progression_name, Family, NamedChord, NamedProgression};
+use harmony_core::theory::{note_name, Mode, Quality, Scale, NOTE_NAMES};
 use harmony_core::STEPS_PER_BEAT;
 use midly::num::{u15, u28, u4, u7};
 use midly::{Format, Header, MetaMessage, MidiMessage, Smf, Timing, TrackEvent, TrackEventKind};
@@ -340,11 +341,155 @@ fn generate(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Famille d'un accord reconnu ; `None` pour un accord sans tierce (sus, quinte) qui
+/// ne contredit aucune famille.
+fn family_of(q: Quality) -> Option<Family> {
+    match q {
+        Quality::Minor | Quality::Minor7 | Quality::Minor6 => Some(Family::Minor),
+        Quality::Diminished | Quality::HalfDiminished7 | Quality::Diminished7 => Some(Family::Diminished),
+        Quality::Sus2 | Quality::Sus4 | Quality::Sus4Seventh | Quality::Power => None,
+        _ => Some(Family::Major),
+    }
+}
+
+fn chord_label(c: &NamedChord) -> String {
+    let suffix = match c.family {
+        Family::Major => "",
+        Family::Minor => "m",
+        Family::Diminished => "dim",
+    };
+    format!("{}{suffix}", NOTE_NAMES[c.root as usize])
+}
+
+/// Banc d'essai : reconnaissance d'accords et de tonalité sur les fichiers « Chord Progression »
+/// d'un dossier de tonalité, comparée aux noms des dossiers.
+fn bench(args: &[String]) -> Result<(), String> {
+    let dir = args.first().ok_or("dossier manquant")?;
+    let show_all = args.iter().any(|a| a == "--all");
+    // `--skip 31,47` : numéros de progressions à écarter (étiquettes incohérentes dans la bibliothèque).
+    let skip: Vec<u32> = args
+        .iter()
+        .position(|a| a == "--skip")
+        .and_then(|i| args.get(i + 1))
+        .map(|list| list.split(',').filter_map(|n| n.trim().parse().ok()).collect())
+        .unwrap_or_default();
+    let key_name = Path::new(dir).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    // « C Major - A Minor » : la paire de tonalités relatives attendue.
+    let expected_keys: Vec<Scale> = key_name
+        .split(" - ")
+        .filter_map(|part| {
+            let mut words = part.split_whitespace();
+            let tonic = parse_key(words.next()?)?.tonic;
+            let mode = if words.next()?.eq_ignore_ascii_case("minor") { Mode::NaturalMinor } else { Mode::Major };
+            Some(Scale::new(tonic, mode))
+        })
+        .collect();
+
+    let mut entries: Vec<_> = std::fs::read_dir(dir).map_err(|e| format!("{dir} : {e}"))?.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    let (mut files, mut exact, mut roots_ok, mut key_ok) = (0, 0, 0, 0);
+    let mut failures: Vec<String> = Vec::new();
+    for entry in entries {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(named) = parse_progression_name(&name) else { continue };
+        if skip.contains(&named.number) {
+            continue;
+        }
+        let Ok(list) = std::fs::read_dir(entry.path().join("Chord Progression")) else { continue };
+        for file in list.flatten() {
+            let path = file.path();
+            let Some(path_str) = path.to_str() else { continue };
+            // Les accords écrits dans le nom du fichier (`…_A-G-Bb-A.mid`) priment sur ceux du dossier :
+            // certains dossiers contiennent par erreur des fichiers d'autres tonalités.
+            let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let from_file = stem
+                .rsplit('_')
+                .next()
+                .and_then(|c| c.split('-').map(parse_chord_name).collect::<Option<Vec<_>>>());
+            // Nom de fichier illisible (`Bbmb`…) : fichier non étiqueté, ignoré.
+            let Some(chords) = from_file.filter(|c| !c.is_empty()) else { continue };
+            // Transposition du fichier par rapport au dossier, pour la tonalité attendue.
+            let shift = (chords[0].root + 12 - named.chords[0].root) % 12;
+            let expected_keys: Vec<Scale> =
+                expected_keys.iter().map(|k| Scale::new((k.tonic + shift) % 12, k.mode)).collect();
+            let named = NamedProgression { chords, ..named.clone() };
+            let Ok(notes) = load_notes(path_str) else { continue };
+            let last = notes.iter().map(|n| n.end).max().unwrap_or(0);
+            let length = last.div_ceil(STEPS_PER_BAR) * STEPS_PER_BAR;
+            let progression = segment(&notes, length);
+            files += 1;
+
+            // Suite reconnue : accords consécutifs de même fondamentale et de famille compatible fusionnés.
+            let mut found: Vec<(u8, Option<Family>)> = Vec::new();
+            for s in &progression.segments {
+                let f = family_of(s.chord.quality);
+                match found.last_mut() {
+                    Some(last) if last.0 == s.chord.root && (last.1.is_none() || f.is_none() || last.1 == f) => {
+                        if last.1.is_none() {
+                            last.1 = f;
+                        }
+                    }
+                    _ => found.push((s.chord.root, f)),
+                }
+            }
+            // Cycle attendu sans doublons consécutifs, y compris au raccord de la boucle
+            // (« Am F G Am » se lit en boucle Am F G).
+            let mut cycle: Vec<NamedChord> = Vec::new();
+            for c in &named.chords {
+                if cycle.last() != Some(c) {
+                    cycle.push(*c);
+                }
+            }
+            if cycle.len() > 1 && cycle.first() == cycle.last() {
+                cycle.pop();
+            }
+            // La suite reconnue doit suivre le cycle depuis son premier accord.
+            let expected: Vec<NamedChord> = cycle.iter().cycle().take(found.len()).copied().collect();
+            let same_roots = !found.is_empty() && found.iter().zip(&expected).all(|(f, e)| f.0 == e.root);
+            let same_all = same_roots && found.iter().zip(&expected).all(|(f, e)| f.1.map_or(true, |fam| fam == e.family));
+            roots_ok += same_roots as usize;
+            exact += same_all as usize;
+
+            let key = detect_key(&notes, &progression);
+            if key.plausible().iter().any(|k| expected_keys.contains(k)) {
+                key_ok += 1;
+            }
+            if !same_all && (show_all || failures.len() < 40) {
+                let got: Vec<String> = progression.segments.iter().map(|s| s.chord.symbol()).collect();
+                let want: Vec<String> = named.chords.iter().map(chord_label).collect();
+                failures.push(format!(
+                    "  {} / {}\n      attendu : {}\n      reconnu : {}",
+                    name,
+                    path.file_name().unwrap().to_string_lossy(),
+                    want.join(" "),
+                    got.join(" ")
+                ));
+            }
+        }
+    }
+    if files == 0 {
+        return Err("aucun fichier « Chord Progression » trouvé".into());
+    }
+    let pct = |n: usize| n as f32 * 100.0 / files as f32;
+    println!("{files} fichiers de progression ({key_name})");
+    println!("  accords exacts (fondamentale + famille) : {exact} ({:.1} %)", pct(exact));
+    println!("  fondamentales exactes                   : {roots_ok} ({:.1} %)", pct(roots_ok));
+    println!("  tonalité parmi les plausibles           : {key_ok} ({:.1} %)", pct(key_ok));
+    if !failures.is_empty() {
+        println!("\nÉcarts{} :", if show_all { "" } else { " (40 premiers ; --all pour tous)" });
+        for f in failures {
+            println!("{f}");
+        }
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("analyze") => analyze(&args[1..]),
         Some("generate") => generate(&args[1..]),
+        Some("bench") => bench(&args[1..]),
         _ => return usage(),
     };
     match result {

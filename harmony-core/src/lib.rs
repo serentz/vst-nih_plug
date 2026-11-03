@@ -7,6 +7,7 @@
 
 pub mod analysis;
 pub mod generate;
+pub mod library;
 pub mod theory;
 
 /// Nombre de pas par temps (pas = double croche).

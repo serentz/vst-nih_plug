@@ -55,7 +55,7 @@ impl Context<'_> {
 /// n'en a pas (accord de quinte captée sans tierce : la gamme la fournit).
 pub fn harmonic_tones(chord: &Chord, scale: &Scale) -> PcSet {
     let mut tones = chord.tones();
-    if !chord.quality.has_third() && !matches!(chord.quality, Quality::Sus2 | Quality::Sus4) {
+    if !chord.quality.has_third() && !matches!(chord.quality, Quality::Sus2 | Quality::Sus4 | Quality::Sus4Seventh) {
         for third in [3, 4] {
             let pc = (chord.root + third) % 12;
             if scale.contains(pc) {

@@ -39,6 +39,17 @@ cargo run -p harmogen-cli --release -- analyze progression.mid --bars 4
 Options : `--bars N` (longueur de la boucle), `--min-pitch P` / `--max-pitch P` (filtrer les notes,
 par exemple `--max-pitch 59` pour ne garder que l'accompagnement d'un fichier qui contient aussi une mélodie).
 
+## Banc d'essai sur une bibliothèque
+
+```bash
+cargo run -p harmogen-cli --release -- bench "<bibliothèque>/C Major - A Minor" --skip 31 [--all]
+```
+
+Compare la progression reconnue de chaque fichier « Chord Progression » aux accords écrits dans son nom
+(un dossier par progression, nommé `<n>_<accords>_<degrés>`). Sur la bibliothèque de référence, en C :
+85,7 % des fichiers reconnus accord par accord ; la plupart des écarts restants sont des libertés du
+compositeur ou des erreurs d'étiquette de la bibliothèque.
+
 ## Générer des lignes
 
 ```bash
