@@ -36,6 +36,7 @@ struct Status {
     notes_out: AtomicU32,
     last_note_in: AtomicI32,
     last_note_timing: AtomicU32,
+    last_note_out: AtomicI32,
 }
 
 fn store_f64(a: &AtomicU64, v: Option<f64>) {
@@ -46,8 +47,22 @@ fn load_f64(a: &AtomicU64) -> f64 {
     f64::from_bits(a.load(Ordering::Relaxed))
 }
 
+/// Note émise à chaque temps en mode `Pulse` (C5).
+const PULSE_NOTE: u8 = 72;
+
+#[derive(Enum, PartialEq, Clone, Copy)]
+enum Mode {
+    /// Renvoie les notes reçues, transposées.
+    Echo,
+    /// Ignore l'entrée et joue C5 sur chaque temps : signal impossible à confondre
+    /// avec le clip source, pour vérifier le routage de la sortie MIDI.
+    Pulse,
+}
+
 #[derive(Params)]
 struct SpikeParams {
+    #[id = "mode"]
+    mode: EnumParam<Mode>,
     #[id = "transpose"]
     transpose: IntParam,
 }
@@ -55,6 +70,7 @@ struct SpikeParams {
 impl Default for SpikeParams {
     fn default() -> Self {
         Self {
+            mode: EnumParam::new("Mode", Mode::Pulse),
             transpose: IntParam::new("Transpose", 12, IntRange::Linear { min: -24, max: 24 })
                 .with_unit(" st"),
         }
@@ -69,6 +85,10 @@ pub struct Harmogen {
     /// Note de sortie actuellement jouée pour chaque (canal, note d'entrée), afin que
     /// le note-off corresponde même si la transposition change pendant la note.
     active: [[Option<u8>; 128]; 16],
+    /// Nombre d'échantillons restant avant le note-off de la note `Pulse` en cours.
+    pulse_off_in: Option<u32>,
+    /// Dernier temps ayant déclenché un pulse, pour ne jamais le jouer deux fois.
+    last_pulse_beat: i64,
 }
 
 impl Default for Harmogen {
@@ -84,6 +104,7 @@ impl Default for Harmogen {
             store_f64(a, None);
         }
         status.last_note_in.store(-1, Ordering::Relaxed);
+        status.last_note_out.store(-1, Ordering::Relaxed);
 
         Self {
             params: Arc::new(SpikeParams::default()),
@@ -91,6 +112,8 @@ impl Default for Harmogen {
             stop_logger: Arc::new(AtomicBool::new(false)),
             logger: None,
             active: [[None; 128]; 16],
+            pulse_off_in: None,
+            last_pulse_beat: i64::MIN,
         }
     }
 }
@@ -113,7 +136,7 @@ impl Harmogen {
                 let s = &status;
                 let ts = s.time_sig.load(Ordering::Relaxed);
                 let line = format!(
-                    "playing={} tempo={:.2} pos={:.3} bar_start={:.3} bar={} sig={}/{} loop=[{:.2}..{:.2}] sr={} buf={} in={} out={} last_in={} @{}",
+                    "playing={} tempo={:.2} pos={:.3} bar_start={:.3} bar={} sig={}/{} loop=[{:.2}..{:.2}] sr={} buf={} in={} out={} last_in={} @{} last_out={}",
                     s.playing.load(Ordering::Relaxed),
                     load_f64(&s.tempo),
                     load_f64(&s.pos_beats),
@@ -129,6 +152,7 @@ impl Harmogen {
                     s.notes_out.load(Ordering::Relaxed),
                     s.last_note_in.load(Ordering::Relaxed),
                     s.last_note_timing.load(Ordering::Relaxed),
+                    s.last_note_out.load(Ordering::Relaxed),
                 );
                 if line != last {
                     let _ = writeln!(file, "{line}");
@@ -213,7 +237,10 @@ impl Plugin for Harmogen {
         let lr = t.loop_range_beats();
         store_f64(&s.loop_start, lr.map(|r| r.0));
         store_f64(&s.loop_end, lr.map(|r| r.1));
+        let (playing, pos_beats, tempo, sample_rate) =
+            (t.playing, t.pos_beats(), t.tempo, t.sample_rate);
 
+        let mode = self.params.mode.value();
         let transpose = self.params.transpose.value();
         while let Some(event) = context.next_event() {
             match event {
@@ -228,7 +255,7 @@ impl Plugin for Harmogen {
                     s.last_note_in.store(note as i32, Ordering::Relaxed);
                     s.last_note_timing.store(timing, Ordering::Relaxed);
                     let out = note as i32 + transpose;
-                    if (0..128).contains(&out) {
+                    if mode == Mode::Echo && (0..128).contains(&out) {
                         let out = out as u8;
                         self.active[channel as usize][note as usize] = Some(out);
                         context.send_event(NoteEvent::NoteOn {
@@ -239,6 +266,7 @@ impl Plugin for Harmogen {
                             velocity,
                         });
                         s.notes_out.fetch_add(1, Ordering::Relaxed);
+                        s.last_note_out.store(out as i32, Ordering::Relaxed);
                     }
                 }
                 NoteEvent::NoteOff {
@@ -262,11 +290,68 @@ impl Plugin for Harmogen {
             }
         }
 
+        // Mode Pulse : un C5 d'un quart de temps sur chaque temps.
+        let n = buffer.samples() as u32;
+        if let Some(remaining) = self.pulse_off_in {
+            if !playing {
+                send_pulse(context, 0, false);
+                self.pulse_off_in = None;
+            } else if remaining < n {
+                send_pulse(context, remaining, false);
+                self.pulse_off_in = None;
+            } else {
+                self.pulse_off_in = Some(remaining - n);
+            }
+        }
+        if mode == Mode::Pulse && playing {
+            if let (Some(pos), Some(tempo)) = (pos_beats, tempo) {
+                let samples_per_beat = sample_rate as f64 * 60.0 / tempo;
+                let next_beat = pos.ceil();
+                let offset = ((next_beat - pos) * samples_per_beat) as u32;
+                if offset < n && next_beat as i64 != self.last_pulse_beat {
+                    self.last_pulse_beat = next_beat as i64;
+                    send_pulse(context, offset, true);
+                    s.notes_out.fetch_add(1, Ordering::Relaxed);
+                    s.last_note_out.store(PULSE_NOTE as i32, Ordering::Relaxed);
+                    let off_at = offset + (samples_per_beat / 4.0) as u32;
+                    if off_at < n {
+                        send_pulse(context, off_at, false);
+                    } else {
+                        self.pulse_off_in = Some(off_at - n);
+                    }
+                }
+            }
+        }
+        if !playing {
+            self.last_pulse_beat = i64::MIN;
+        }
+
         for channel in buffer.as_slice() {
             channel.fill(0.0);
         }
         ProcessStatus::Normal
     }
+}
+
+fn send_pulse(context: &mut impl ProcessContext<Harmogen>, timing: u32, on: bool) {
+    let event = if on {
+        NoteEvent::NoteOn {
+            timing,
+            voice_id: None,
+            channel: 0,
+            note: PULSE_NOTE,
+            velocity: 0.8,
+        }
+    } else {
+        NoteEvent::NoteOff {
+            timing,
+            voice_id: None,
+            channel: 0,
+            note: PULSE_NOTE,
+            velocity: 0.0,
+        }
+    };
+    context.send_event(event);
 }
 
 impl Vst3Plugin for Harmogen {
